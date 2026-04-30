@@ -1,60 +1,11 @@
-// backend/db.js
-// Uses sql.js — pure JavaScript SQLite, works on any Node version / Vercel
+// backend/db.js — uses Turso (hosted SQLite, works on Vercel)
 require('dotenv').config();
+const { createClient } = require('@libsql/client');
 
-const initSqlJs = require('sql.js');
-
-let db;
-
-// Convert args to sql.js param format
-function flattenParams(sql, args) {
-  if (args.length === 0) return [];
-  if (args.length === 1 && args[0] !== null && typeof args[0] === 'object'
-      && !Array.isArray(args[0]) && /[$:@][a-zA-Z_]/.test(sql)) {
-    const out = {};
-    for (const [k, v] of Object.entries(args[0])) {
-      const key = k.startsWith('$') || k.startsWith(':') || k.startsWith('@') ? k : `$${k}`;
-      out[key] = v;
-    }
-    return out;
-  }
-  return args.flat();
-}
-
-function makeStmt(sql) {
-  return {
-    run(...args) {
-      try {
-        db.run(sql, flattenParams(sql, args));
-        return { changes: db.getRowsModified() };
-      } catch(e) { throw new Error(`[db.run] ${e.message}\nSQL: ${sql}`); }
-    },
-    get(...args) {
-      try {
-        const stmt = db.prepare(sql);
-        stmt.bind(flattenParams(sql, args));
-        const row = stmt.step() ? stmt.getAsObject() : undefined;
-        stmt.free();
-        return row;
-      } catch(e) { throw new Error(`[db.get] ${e.message}\nSQL: ${sql}`); }
-    },
-    all(...args) {
-      try {
-        const stmt = db.prepare(sql);
-        stmt.bind(flattenParams(sql, args));
-        const rows = [];
-        while (stmt.step()) rows.push(stmt.getAsObject());
-        stmt.free();
-        return rows;
-      } catch(e) { throw new Error(`[db.all] ${e.message}\nSQL: ${sql}`); }
-    },
-  };
-}
-
-function prepare(sql) { return makeStmt(sql); }
-function exec(sql, ...params) { db.run(sql, params.length ? flattenParams(sql, params) : undefined); }
-function query(sql, ...params) { return makeStmt(sql).all(...params); }
-function queryOne(sql, ...params) { return makeStmt(sql).get(...params); }
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -92,11 +43,58 @@ const SCHEMA = `
   );
 `;
 
-let stmts;
+// ── Turso is async — wrap everything in a sync-style interface ──
+function prepare(sql) {
+  return {
+    async run(params = {}) {
+      await db.execute({ sql, args: normalizeParams(sql, params) });
+    },
+    async get(...args) {
+      const res = await db.execute({ sql, args: normalizeArgs(sql, args) });
+      return res.rows[0] ? rowToObj(res.rows[0], res.columns) : undefined;
+    },
+    async all(...args) {
+      const res = await db.execute({ sql, args: normalizeArgs(sql, args) });
+      return res.rows.map(r => rowToObj(r, res.columns));
+    },
+  };
+}
 
-function recomputeStats(userEmail) {
-  const rows = query("SELECT tag, COUNT(*) as cnt FROM emails WHERE user_email = ? AND deleted = 0 GROUP BY tag", userEmail);
-  const repliedRow = queryOne("SELECT COUNT(*) as cnt FROM emails WHERE user_email = ? AND replied = 1 AND deleted = 0", userEmail);
+function normalizeParams(sql, params) {
+  if (Array.isArray(params)) return params;
+  if (typeof params === 'object' && params !== null) return params;
+  return [];
+}
+
+function normalizeArgs(sql, args) {
+  if (args.length === 0) return [];
+  if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) return args[0];
+  return args;
+}
+
+function rowToObj(row, columns) {
+  const obj = {};
+  columns.forEach((col, i) => { obj[col] = row[i]; });
+  return obj;
+}
+
+async function query(sql, ...args) {
+  const res = await db.execute({ sql, args: normalizeArgs(sql, args) });
+  return res.rows.map(r => rowToObj(r, res.columns));
+}
+
+async function queryOne(sql, ...args) {
+  const res = await db.execute({ sql, args: normalizeArgs(sql, args) });
+  return res.rows[0] ? rowToObj(res.rows[0], res.columns) : undefined;
+}
+
+async function exec(sql, ...args) {
+  await db.execute({ sql, args: args.length ? normalizeArgs(sql, args) : [] });
+}
+
+async function recomputeStats(userEmail) {
+  const rows = await query("SELECT tag, COUNT(*) as cnt FROM emails WHERE user_email = ? AND deleted = 0 GROUP BY tag", userEmail);
+  const repliedRow = await queryOne("SELECT COUNT(*) as cnt FROM emails WHERE user_email = ? AND replied = 1 AND deleted = 0", userEmail);
   const stats = { user_email: userEmail, total: 0, important: 0, promo: 0, spam: 0, replied: Number(repliedRow?.cnt || 0) };
   for (const r of rows) {
     stats.total += Number(r.cnt);
@@ -104,46 +102,39 @@ function recomputeStats(userEmail) {
     if (r.tag === 'promo')     stats.promo     = Number(r.cnt);
     if (r.tag === 'spam')      stats.spam      = Number(r.cnt);
   }
-  stmts.upsertStats.run(stats);
+  await stmts.upsertStats.run(stats);
   return stats;
 }
 
-function markEmailsDeleted(userEmail, emailIds) {
+async function markEmailsDeleted(userEmail, emailIds) {
   if (!emailIds.length) return;
   const ph = emailIds.map(() => '?').join(',');
-  makeStmt(`UPDATE emails SET deleted = 1 WHERE user_email = ? AND id IN (${ph})`).run(userEmail, ...emailIds);
+  await db.execute({ sql: `UPDATE emails SET deleted = 1 WHERE user_email = ? AND id IN (${ph})`, args: [userEmail, ...emailIds] });
 }
 
-async function init() {
-  const SQL = await initSqlJs();
-  db = new SQL.Database();
-  db.run('PRAGMA foreign_keys = ON');
-  db.run(SCHEMA);
-  stmts = {
-    getUserByEmail:   prepare('SELECT * FROM users WHERE email = ?'),
-    createUser:       prepare('INSERT INTO users (first_name, last_name, email, password, role, is_verified) VALUES ($first_name, $last_name, $email, $password, $role, $is_verified)'),
-    verifyUser:       prepare('UPDATE users SET is_verified = 1 WHERE email = ?'),
-    updatePassword:   prepare('UPDATE users SET password = ? WHERE email = ?'),
-    deleteUser:       prepare('DELETE FROM users WHERE email = ?'),
-    insertOTP:        prepare('INSERT INTO otp_codes (email, code, type, expires_at) VALUES ($email, $code, $type, $expires_at)'),
-    getValidOTP:      prepare("SELECT * FROM otp_codes WHERE email = ? AND type = ? AND used = 0 AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"),
-    markOTPUsed:      prepare('UPDATE otp_codes SET used = 1 WHERE id = ?'),
-    getToken:         prepare('SELECT * FROM gmail_tokens WHERE user_email = ?'),
-    upsertToken:      prepare('INSERT INTO gmail_tokens (user_email, access_token, refresh_token, token_expiry, scope) VALUES ($user_email, $access_token, $refresh_token, $token_expiry, $scope) ON CONFLICT(user_email) DO UPDATE SET access_token = excluded.access_token, refresh_token = COALESCE(excluded.refresh_token, gmail_tokens.refresh_token), token_expiry = excluded.token_expiry, scope = excluded.scope'),
-    deleteToken:      prepare('DELETE FROM gmail_tokens WHERE user_email = ?'),
-    upsertEmail:      prepare('INSERT INTO emails (id, user_email, gmail_id, thread_id, from_addr, from_name, subject, snippet, body, tag, color, email_time) VALUES ($id, $user_email, $gmail_id, $thread_id, $from_addr, $from_name, $subject, $snippet, $body, $tag, $color, $email_time) ON CONFLICT(id) DO UPDATE SET tag = excluded.tag, snippet = excluded.snippet, body = excluded.body'),
-    getEmails:        prepare('SELECT * FROM emails WHERE user_email = ? AND deleted = 0 ORDER BY fetched_at DESC LIMIT 100'),
-    markEmailReplied: prepare('UPDATE emails SET replied = 1 WHERE id = ?'),
-    insertLog:        prepare('INSERT INTO agent_logs (user_email, dot_color, message) VALUES (?, ?, ?)'),
-    getLogs:          prepare('SELECT * FROM agent_logs WHERE user_email = ? ORDER BY id DESC LIMIT 100'),
-    upsertStats:      prepare("INSERT INTO agent_stats (user_email, total, important, promo, spam, replied) VALUES ($user_email, $total, $important, $promo, $spam, $replied) ON CONFLICT(user_email) DO UPDATE SET total = excluded.total, important = excluded.important, promo = excluded.promo, spam = excluded.spam, replied = excluded.replied, updated_at = datetime('now')"),
-  };
-  console.log('[db] sql.js initialised OK');
-}
+const stmts = {
+  getUserByEmail:   prepare('SELECT * FROM users WHERE email = ?'),
+  createUser:       prepare('INSERT INTO users (first_name, last_name, email, password, role, is_verified) VALUES ($first_name, $last_name, $email, $password, $role, $is_verified)'),
+  verifyUser:       prepare('UPDATE users SET is_verified = 1 WHERE email = ?'),
+  updatePassword:   prepare('UPDATE users SET password = ? WHERE email = ?'),
+  deleteUser:       prepare('DELETE FROM users WHERE email = ?'),
+  insertOTP:        prepare('INSERT INTO otp_codes (email, code, type, expires_at) VALUES ($email, $code, $type, $expires_at)'),
+  getValidOTP:      prepare("SELECT * FROM otp_codes WHERE email = ? AND type = ? AND used = 0 AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"),
+  markOTPUsed:      prepare('UPDATE otp_codes SET used = 1 WHERE id = ?'),
+  getToken:         prepare('SELECT * FROM gmail_tokens WHERE user_email = ?'),
+  upsertToken:      prepare('INSERT INTO gmail_tokens (user_email, access_token, refresh_token, token_expiry, scope) VALUES ($user_email, $access_token, $refresh_token, $token_expiry, $scope) ON CONFLICT(user_email) DO UPDATE SET access_token = excluded.access_token, refresh_token = COALESCE(excluded.refresh_token, gmail_tokens.refresh_token), token_expiry = excluded.token_expiry, scope = excluded.scope'),
+  deleteToken:      prepare('DELETE FROM gmail_tokens WHERE user_email = ?'),
+  upsertEmail:      prepare('INSERT INTO emails (id, user_email, gmail_id, thread_id, from_addr, from_name, subject, snippet, body, tag, color, email_time) VALUES ($id, $user_email, $gmail_id, $thread_id, $from_addr, $from_name, $subject, $snippet, $body, $tag, $color, $email_time) ON CONFLICT(id) DO UPDATE SET tag = excluded.tag, snippet = excluded.snippet, body = excluded.body'),
+  getEmails:        prepare('SELECT * FROM emails WHERE user_email = ? AND deleted = 0 ORDER BY fetched_at DESC LIMIT 100'),
+  markEmailReplied: prepare('UPDATE emails SET replied = 1 WHERE id = ?'),
+  insertLog:        prepare('INSERT INTO agent_logs (user_email, dot_color, message) VALUES (?, ?, ?)'),
+  getLogs:          prepare('SELECT * FROM agent_logs WHERE user_email = ? ORDER BY id DESC LIMIT 100'),
+  upsertStats:      prepare("INSERT INTO agent_stats (user_email, total, important, promo, spam, replied) VALUES ($user_email, $total, $important, $promo, $spam, $replied) ON CONFLICT(user_email) DO UPDATE SET total = excluded.total, important = excluded.important, promo = excluded.promo, spam = excluded.spam, replied = excluded.replied, updated_at = datetime('now')"),
+};
 
-const initPromise = init().catch(err => {
-  console.error('[db] FATAL:', err.message);
-  process.exit(1);
-});
+// ── Init schema on startup ────────────────────────────────────
+const initPromise = db.executeMultiple(SCHEMA)
+  .then(() => console.log('[db] Turso initialised OK'))
+  .catch(err => { console.error('[db] FATAL:', err.message); process.exit(1); });
 
-module.exports = { get db() { return db; }, get stmts() { return stmts; }, initPromise, recomputeStats, markEmailsDeleted, query, queryOne, exec };
+module.exports = { db, stmts, initPromise, recomputeStats, markEmailsDeleted, query, queryOne, exec };
