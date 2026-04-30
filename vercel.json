@@ -5,29 +5,19 @@
       "src": "backend/server.js",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": [
-          "backend/**",
-          "public/**"
-        ]
+        "includeFiles": ["backend/**", "public/**"]
       }
     }
   ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "backend/server.js"
-    },
-    {
-      "src": "/dashboard(.*)",
-      "dest": "backend/server.js"
-    },
-    {
-      "src": "/",
-      "dest": "backend/server.js"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "backend/server.js"
+  "functions": {
+    "backend/server.js": {
+      "runtime": "nodejs22.x"
     }
+  },
+  "routes": [
+    { "src": "/api/(.*)", "dest": "backend/server.js" },
+    { "src": "/dashboard(.*)", "dest": "backend/server.js" },
+    { "src": "/", "dest": "backend/server.js" },
+    { "src": "/(.*)", "dest": "backend/server.js" }
   ]
 }
