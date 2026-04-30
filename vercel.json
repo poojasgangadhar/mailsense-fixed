@@ -1,10 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "backend/server.js": {
-      "runtime": "nodejs22.x"
-    }
-  },
   "routes": [
     { "src": "/api/(.*)", "dest": "backend/server.js" },
     { "src": "/dashboard(.*)", "dest": "backend/server.js" },
