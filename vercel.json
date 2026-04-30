@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "routes": [
-    { "src": "/api/(.*)", "dest": "backend/server.js" },
-    { "src": "/dashboard(.*)", "dest": "backend/server.js" },
-    { "src": "/", "dest": "backend/server.js" },
-    { "src": "/(.*)", "dest": "backend/server.js" }
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "backend/server.js" },
+    { "source": "/dashboard(.*)", "destination": "backend/server.js" },
+    { "source": "/", "destination": "backend/server.js" },
+    { "source": "/(.*)", "destination": "backend/server.js" }
   ]
 }
