@@ -17,6 +17,10 @@ const gmailRoutes = require('./routes/gmail');
 const { startScheduler } = require('./scheduler');
 
 const app  = express();
+const { initPromise } = require('./db');
+app.use((req, res, next) => {
+  initPromise.then(() => next()).catch(next);
+});
 const PORT = process.env.PORT || 3000;
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
