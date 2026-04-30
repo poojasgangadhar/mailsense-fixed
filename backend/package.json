@@ -1,6 +1,7 @@
 {
   "name": "agentra-mailsense-backend",
   "version": "1.0.0",
+  "description": "Agentra MailSense – Agentic Email Automation Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
