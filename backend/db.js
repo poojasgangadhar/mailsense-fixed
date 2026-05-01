@@ -43,33 +43,18 @@ const SCHEMA = `
   );
 `;
 
-// ── Turso is async — wrap everything in a sync-style interface ──
-function prepare(sql) {
-  return {
-    async run(params = {}) {
-      await db.execute({ sql, args: normalizeParams(sql, params) });
-    },
-    async get(...args) {
-      const res = await db.execute({ sql, args: normalizeArgs(sql, args) });
-      return res.rows[0] ? rowToObj(res.rows[0], res.columns) : undefined;
-    },
-    async all(...args) {
-      const res = await db.execute({ sql, args: normalizeArgs(sql, args) });
-      return res.rows.map(r => rowToObj(r, res.columns));
-    },
-  };
-}
-
-function normalizeParams(sql, params) {
-  if (Array.isArray(params)) return params;
-  if (typeof params === 'object' && params !== null) return params;
-  return [];
-}
-
-function normalizeArgs(sql, args) {
+function toArgs(sql, args) {
   if (args.length === 0) return [];
-  if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) return args[0];
-  return args;
+  // Single named-param object (has $ params in SQL)
+  if (args.length === 1
+      && args[0] !== null
+      && typeof args[0] === 'object'
+      && !Array.isArray(args[0])
+      && /[$@:][a-zA-Z_]/.test(sql)) {
+    return args[0];
+  }
+  // Positional — flatten to array
+  return args.flat();
 }
 
 function rowToObj(row, columns) {
@@ -78,18 +63,34 @@ function rowToObj(row, columns) {
   return obj;
 }
 
+function prepare(sql) {
+  return {
+    async run(...args) {
+      await db.execute({ sql, args: toArgs(sql, args) });
+    },
+    async get(...args) {
+      const res = await db.execute({ sql, args: toArgs(sql, args) });
+      return res.rows[0] ? rowToObj(res.rows[0], res.columns) : undefined;
+    },
+    async all(...args) {
+      const res = await db.execute({ sql, args: toArgs(sql, args) });
+      return res.rows.map(r => rowToObj(r, res.columns));
+    },
+  };
+}
+
 async function query(sql, ...args) {
-  const res = await db.execute({ sql, args: normalizeArgs(sql, args) });
+  const res = await db.execute({ sql, args: toArgs(sql, args) });
   return res.rows.map(r => rowToObj(r, res.columns));
 }
 
 async function queryOne(sql, ...args) {
-  const res = await db.execute({ sql, args: normalizeArgs(sql, args) });
+  const res = await db.execute({ sql, args: toArgs(sql, args) });
   return res.rows[0] ? rowToObj(res.rows[0], res.columns) : undefined;
 }
 
 async function exec(sql, ...args) {
-  await db.execute({ sql, args: args.length ? normalizeArgs(sql, args) : [] });
+  await db.execute({ sql, args: toArgs(sql, args) });
 }
 
 async function recomputeStats(userEmail) {
@@ -132,7 +133,6 @@ const stmts = {
   upsertStats:      prepare("INSERT INTO agent_stats (user_email, total, important, promo, spam, replied) VALUES ($user_email, $total, $important, $promo, $spam, $replied) ON CONFLICT(user_email) DO UPDATE SET total = excluded.total, important = excluded.important, promo = excluded.promo, spam = excluded.spam, replied = excluded.replied, updated_at = datetime('now')"),
 };
 
-// ── Init schema on startup ────────────────────────────────────
 const initPromise = db.executeMultiple(SCHEMA)
   .then(() => console.log('[db] Turso initialised OK'))
   .catch(err => { console.error('[db] FATAL:', err.message); process.exit(1); });
