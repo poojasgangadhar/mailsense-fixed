@@ -1276,8 +1276,6 @@ const disconnectCalendar=async()=>{ try{await authFetch('/api/calendar-disconnec
   if(showOB)return <Onboarding onComplete={m=>{setMode(m);setShowOB(false);}}/>;
 
   return(<div className="layout">
-  <NavItem id="gmail" label="Gmail" icon={I.mail}/>
-  <NavItem id="calendar" label="Calendar" icon={I.calendar||I.chart}/>
     <div className={`sb-overlay ${sbOpen?'active':''}`} onClick={()=>setSbOpen(false)}/>
 
     {/* ══ SIDEBAR ══ */}
