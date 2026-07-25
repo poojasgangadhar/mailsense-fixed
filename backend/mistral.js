@@ -181,6 +181,64 @@ async function classifyEmail({ subject, snippet, fromAddr, fromName, userOwnEmai
   }
 }
 
+// ── Meeting/appointment intent detection ──────────────────────
+// Returns { isMeeting, durationMinutes, requestedTimeText, urgency, contactName }
+// so the scheduling engine (backend/scheduling.js) can propose real slots.
+async function detectMeetingIntent({ subject, snippet, body, fromAddr, fromName, userOwnEmail }) {
+  const none = { isMeeting: false, durationMinutes: 30, requestedTimeText: '', urgency: 'normal', contactName: fromName || '' };
+  if (isSelfSent(fromAddr, userOwnEmail)) return none;
+  if (!getMistralKey()) return ruleBasedMeetingDetect(subject, snippet, fromName);
+
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'You detect whether an email is requesting a meeting, call, or appointment to be scheduled.\n' +
+        'Respond with ONLY a JSON object, no other text, in this exact shape:\n' +
+        '{"isMeeting": true|false, "durationMinutes": 15|30|60, "requestedTimeText": "<the time phrase they used, e.g. \'next Friday afternoon\', or empty string if none>", "urgency": "low"|"normal"|"high"}\n' +
+        'isMeeting is true only for genuine requests to meet/call/schedule time together — not for automated notifications, newsletters, or emails that merely mention a past meeting.\n' +
+        'Infer durationMinutes from context (quick call=15, standard=30, in-depth/interview=60); default 30 if unclear.\n' +
+        'urgency is "high" only if the email conveys real time pressure (e.g. "today", "urgent", "ASAP").',
+    },
+    {
+      role: 'user',
+      content: `From: ${fromName || ''} <${fromAddr || ''}>\nSubject: ${subject || '(no subject)'}\nBody: ${(body || snippet || '').slice(0, 800)}`,
+    },
+  ];
+
+  try {
+    const result = await mistralChat(messages, 150);
+    const jsonMatch = result.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return ruleBasedMeetingDetect(subject, snippet, fromName);
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      isMeeting: !!parsed.isMeeting,
+      durationMinutes: [15, 30, 60].includes(parsed.durationMinutes) ? parsed.durationMinutes : 30,
+      requestedTimeText: (parsed.requestedTimeText || '').slice(0, 200),
+      urgency: ['low', 'normal', 'high'].includes(parsed.urgency) ? parsed.urgency : 'normal',
+      contactName: fromName || '',
+    };
+  } catch (err) {
+    console.error('[Mistral] detectMeetingIntent error:', err.message);
+    return ruleBasedMeetingDetect(subject, snippet, fromName);
+  }
+}
+
+// ── Fallback keyword-based meeting detection (no API key / API failure) ──
+const MEETING_KEYWORDS = [
+  'schedule a call', 'schedule a meeting', 'book a call', 'book a meeting',
+  'set up a call', 'set up a meeting', 'hop on a call', 'jump on a call',
+  'available for a call', 'available to meet', 'quick call', 'quick chat',
+  'meet this week', 'meet next week', 'find time', 'grab 15 minutes',
+  'grab 30 minutes', 'let\'s connect', 'catch up call', 'discovery call',
+  'can we meet', 'can we talk', 'when are you free', 'your availability',
+];
+function ruleBasedMeetingDetect(subject = '', snippet = '', fromName = '') {
+  const text = `${subject} ${snippet}`.toLowerCase();
+  const isMeeting = MEETING_KEYWORDS.some(k => text.includes(k));
+  return { isMeeting, durationMinutes: 30, requestedTimeText: '', urgency: 'normal', contactName: fromName || '' };
+}
+
 // ── Generate reply ────────────────────────────────────────────
 // IMPORTANT: senderFirstName / senderLastName must be the user's
 // actual signup name pulled from the DB by the caller (e.g. the
@@ -260,4 +318,4 @@ async function generateReply({
   }
 }
 
-module.exports = { classifyEmail, generateReply, isNoReplyEmail };
+module.exports = { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent };

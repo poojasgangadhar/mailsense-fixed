@@ -14,8 +14,8 @@ const path    = require('path');
 
 const authRoutes    = require('./routes/auth');
 const gmailRoutes   = require('./routes/gmail');
-const calendarRoutes = require('./routes/calendar');
 const webauthnRoutes = require('./routes/webauthn');
+const bookingRoutes = require('./routes/booking');
 const { startScheduler, runScheduler } = require('./scheduler');
 
 const app  = express();
@@ -43,7 +43,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // ── API Routes ────────────────────────────────────────────────
 app.use('/api', authRoutes);
 app.use('/api', gmailRoutes);
-app.use('/api', calendarRoutes);
+app.use('/api', bookingRoutes);
 app.use('/api/webauthn', webauthnRoutes);
 
 // ── Vercel Cron: auto-delete scheduler ───────────────────────

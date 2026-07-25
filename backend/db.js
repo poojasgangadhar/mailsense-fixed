@@ -69,69 +69,30 @@ const SCHEMA = `
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (user_email, setting_key)
   );
-
-  -- ── AI Appointment Booking (Phase 1) ──────────────────────────
-  CREATE TABLE IF NOT EXISTS calendar_connections (
-    id TEXT PRIMARY KEY, user_email TEXT NOT NULL,
-    provider TEXT NOT NULL DEFAULT 'google',
-    provider_account_email TEXT,
-    access_token TEXT, refresh_token TEXT, token_expiry TEXT, scope TEXT,
-    calendar_id TEXT DEFAULT 'primary',
-    is_primary INTEGER NOT NULL DEFAULT 1,
-    sync_status TEXT NOT NULL DEFAULT 'active',
-    connected_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS availability_rules (
-    id TEXT PRIMARY KEY, user_email TEXT NOT NULL,
-    day_of_week INTEGER NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL,
-    timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',
-    buffer_before_minutes INTEGER NOT NULL DEFAULT 0,
-    buffer_after_minutes INTEGER NOT NULL DEFAULT 0,
-    max_meetings_per_day INTEGER,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS meeting_types (
-    id TEXT PRIMARY KEY, user_email TEXT NOT NULL,
-    name TEXT NOT NULL, duration_minutes INTEGER NOT NULL,
-    location_type TEXT NOT NULL DEFAULT 'google_meet',
-    description TEXT, color TEXT DEFAULT '#4f6ef7',
-    is_active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS booking_links (
-    id TEXT PRIMARY KEY, user_email TEXT NOT NULL,
-    meeting_type_id TEXT, slug TEXT UNIQUE NOT NULL,
-    is_public INTEGER NOT NULL DEFAULT 1, requires_approval INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS meetings (
-    id TEXT PRIMARY KEY, user_email TEXT NOT NULL,
-    meeting_type_id TEXT, calendar_connection_id TEXT,
-    external_event_id TEXT, title TEXT,
-    start_time TEXT NOT NULL, end_time TEXT NOT NULL,
-    timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',
+  CREATE TABLE IF NOT EXISTS appointments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL,
+    email_id TEXT, thread_id TEXT,
+    contact_email TEXT NOT NULL, contact_name TEXT,
+    subject TEXT, duration_minutes INTEGER NOT NULL DEFAULT 30,
     status TEXT NOT NULL DEFAULT 'pending',
-    source TEXT NOT NULL DEFAULT 'ai_email', source_email_id TEXT,
-    meeting_link TEXT, is_recurring INTEGER NOT NULL DEFAULT 0, recurrence_rule TEXT,
+    proposed_slots TEXT,
+    confirmed_start TEXT, confirmed_end TEXT,
+    meet_link TEXT, calendar_event_id TEXT,
+    urgency TEXT DEFAULT 'normal', requested_time_text TEXT,
     notes TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
-  CREATE TABLE IF NOT EXISTS meeting_attendees (
-    id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL,
-    email TEXT NOT NULL, name TEXT,
-    is_organizer INTEGER NOT NULL DEFAULT 0, rsvp_status TEXT NOT NULL DEFAULT 'pending', tag TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS ai_scheduling_sessions (
-    id TEXT PRIMARY KEY, user_email TEXT NOT NULL,
-    email_thread_id TEXT NOT NULL, meeting_id TEXT,
-    status TEXT NOT NULL DEFAULT 'negotiating',
-    proposed_slots TEXT, extracted_intent TEXT,
-    auto_mode INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CREATE TABLE IF NOT EXISTS availability_settings (
+    user_email TEXT PRIMARY KEY,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    working_days TEXT NOT NULL DEFAULT '[1,2,3,4,5]',
+    work_start TEXT NOT NULL DEFAULT '09:00',
+    work_end TEXT NOT NULL DEFAULT '18:00',
+    buffer_minutes INTEGER NOT NULL DEFAULT 10,
+    default_duration_minutes INTEGER NOT NULL DEFAULT 30,
+    daily_meeting_limit INTEGER NOT NULL DEFAULT 8,
+    booking_mode TEXT NOT NULL DEFAULT 'approval',
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `;
@@ -232,15 +193,13 @@ const stmts = {
   insertLog:        prepare('INSERT INTO agent_logs (user_email, dot_color, message) VALUES (?, ?, ?)'),
   getLogs:          prepare('SELECT * FROM agent_logs WHERE user_email = ? ORDER BY id DESC LIMIT 100'),
   upsertStats:      prepare("INSERT INTO agent_stats (user_email, total, important, promo, spam, social, updates, replied) VALUES ($user_email, $total, $important, $promo, $spam, $social, $updates, $replied) ON CONFLICT(user_email) DO UPDATE SET total = excluded.total, important = excluded.important, promo = excluded.promo, spam = excluded.spam, social = excluded.social, updates = excluded.updates, replied = excluded.replied, updated_at = datetime('now')"),
-
-  // ── Calendar connections (Phase 1 — AI Appointment Booking) ──
-  getCalendarConnection:     prepare("SELECT * FROM calendar_connections WHERE user_email = ? AND provider = ? ORDER BY is_primary DESC, connected_at ASC LIMIT 1"),
-  getCalendarConnections:    prepare('SELECT * FROM calendar_connections WHERE user_email = ? ORDER BY is_primary DESC, connected_at ASC'),
-  getCalendarConnectionById: prepare('SELECT * FROM calendar_connections WHERE id = ?'),
-  insertCalendarConnection:  prepare('INSERT INTO calendar_connections (id, user_email, provider, provider_account_email, access_token, refresh_token, token_expiry, scope, calendar_id, is_primary) VALUES ($id, $user_email, $provider, $provider_account_email, $access_token, $refresh_token, $token_expiry, $scope, $calendar_id, $is_primary)'),
-  updateCalendarTokens:      prepare("UPDATE calendar_connections SET access_token = $access_token, refresh_token = COALESCE($refresh_token, refresh_token), token_expiry = $token_expiry, scope = $scope, sync_status = 'active', updated_at = datetime('now') WHERE id = $id"),
-  markCalendarSyncError:     prepare("UPDATE calendar_connections SET sync_status = 'error', updated_at = datetime('now') WHERE id = ?"),
-  deleteCalendarConnection:  prepare('DELETE FROM calendar_connections WHERE id = ? AND user_email = ?'),
+  createAppointment: prepare('INSERT INTO appointments (user_email, email_id, thread_id, contact_email, contact_name, subject, duration_minutes, status, proposed_slots, urgency, requested_time_text) VALUES ($user_email, $email_id, $thread_id, $contact_email, $contact_name, $subject, $duration_minutes, $status, $proposed_slots, $urgency, $requested_time_text)'),
+  getAppointment:    prepare('SELECT * FROM appointments WHERE id = ? AND user_email = ?'),
+  getAppointmentByEmail: prepare('SELECT * FROM appointments WHERE email_id = ? AND user_email = ?'),
+  listAppointments:  prepare("SELECT * FROM appointments WHERE user_email = ? AND status = ? ORDER BY created_at DESC LIMIT 200"),
+  updateAppointmentStatus: prepare("UPDATE appointments SET status = $status, confirmed_start = $confirmed_start, confirmed_end = $confirmed_end, meet_link = $meet_link, calendar_event_id = $calendar_event_id, updated_at = datetime('now') WHERE id = $id AND user_email = $user_email"),
+  getAvailability:   prepare('SELECT * FROM availability_settings WHERE user_email = ?'),
+  upsertAvailability: prepare("INSERT INTO availability_settings (user_email, timezone, working_days, work_start, work_end, buffer_minutes, default_duration_minutes, daily_meeting_limit, booking_mode) VALUES ($user_email, $timezone, $working_days, $work_start, $work_end, $buffer_minutes, $default_duration_minutes, $daily_meeting_limit, $booking_mode) ON CONFLICT(user_email) DO UPDATE SET timezone=excluded.timezone, working_days=excluded.working_days, work_start=excluded.work_start, work_end=excluded.work_end, buffer_minutes=excluded.buffer_minutes, default_duration_minutes=excluded.default_duration_minutes, daily_meeting_limit=excluded.daily_meeting_limit, booking_mode=excluded.booking_mode, updated_at=datetime('now')"),
 };
 
 const MIGRATIONS = [

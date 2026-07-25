@@ -1,8 +1,10 @@
 // backend/routes/gmail.js
 const express = require('express');
-const { db, stmts, recomputeStats, markEmailsDeleted, queryOne, exec } = require('../db');
+const { db, stmts, recomputeStats, markEmailsDeleted, queryOne, query, exec } = require('../db');
 const gmailHelper = require('../gmail');
-const { classifyEmail, generateReply, isNoReplyEmail } = require('../mistral');
+const { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent } = require('../mistral');
+const schedulingHelper = require('../scheduling');
+const calendarHelper = require('../calendar');
 const { requireAuth, verifyToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -119,22 +121,34 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
     const SOCIAL_DOMAINS = ['linkedin.com','instagram.com','facebook.com','twitter.com','x.com','github.com','youtube.com','whatsapp.com','discord.com'];
     const UPDATE_DOMAINS = ['naukri.com','indeed.com','glassdoor.com','amazon.com','flipkart.com','swiggy.com','zomato.com','paytm.com','phonepe.com','razorpay.com'];
 
+    // Batch-fetch existing tags for ALL messages in one query instead of
+    // one round-trip per message (this was the main source of slow fetches —
+    // 100 emails meant 100+ sequential network calls to Turso before this fix).
+    let existingTagById = new Map();
+    if (messages.length) {
+      const ph = messages.map(() => '?').join(',');
+      const rows = await query(`SELECT id, tag FROM emails WHERE id IN (${ph})`, ...messages.map(m => m.id));
+      existingTagById = new Map(rows.map(r => [r.id, r.tag]));
+    }
+
     let newCount = 0;
     const toClassify = [];
+    const tagById = new Map(); // reused below for the archive check — avoids querying again
     for (const msg of messages) {
-      const existing = await queryOne('SELECT id, tag FROM emails WHERE id = ?', msg.id);
+      const existingTag = existingTagById.get(msg.id);
       const addr = (msg.from_addr || '').toLowerCase();
       const isSocial = SOCIAL_DOMAINS.some(d => addr.includes(d));
       const isUpdate = UPDATE_DOMAINS.some(d => addr.includes(d));
 
-      let tag = existing?.tag || 'important';
+      let tag = existingTag || 'important';
       // Force correct tag for known social/update domains regardless of old tag
       if (isSocial) tag = 'social';
       else if (isUpdate) tag = 'updates';
-      else if (!existing?.tag) {
+      else if (!existingTag) {
         toClassify.push(msg);
         newCount++;
       }
+      tagById.set(msg.id, tag);
       await stmts.upsertEmail.run({
         id: msg.id, user_email: email, gmail_id: msg.gmail_id, thread_id: msg.thread_id || null,
         from_addr: msg.from_addr || '', from_name: msg.from_name || '',
@@ -154,13 +168,49 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
             const tag = await classifyEmail({ subject: msg.subject, snippet: msg.snippet, fromAddr: msg.from_addr, fromName: msg.from_name, userOwnEmail: email });
             await exec('UPDATE emails SET tag = ? WHERE id = ?', tag, msg.id);
           } catch { /* keep default tag */ }
+
+          // AI Appointment Booking Module (Phase 1) — detect meeting
+          // requests and propose real Calendar slots for review.
+          try {
+            const existingAppt = await stmts.getAppointmentByEmail.get(msg.id, email);
+            if (existingAppt) return; // already processed this email
+
+            const intent = await detectMeetingIntent({
+              subject: msg.subject, snippet: msg.snippet, body: msg.body,
+              fromAddr: msg.from_addr, fromName: msg.from_name, userOwnEmail: email,
+            });
+            if (!intent.isMeeting) return;
+
+            const tokenRow = await stmts.getToken.get(email);
+            if (!tokenRow || !calendarHelper.hasCalendarScope(tokenRow)) return; // needs reconnect to grant Calendar access
+
+            const saveToken = (t) => stmts.upsertToken.run({ user_email: email, ...t });
+            const settingsRow = await stmts.getAvailability.get(email);
+            const { slots } = await schedulingHelper.computeAvailableSlots({
+              tokenRow, saveToken, settingsRow,
+              durationMinutes: intent.durationMinutes,
+              requestedTimeText: intent.requestedTimeText,
+            });
+            if (!slots.length) return;
+
+            await stmts.createAppointment.run({
+              user_email: email, email_id: msg.id, thread_id: msg.thread_id || null,
+              contact_email: msg.from_addr, contact_name: msg.from_name || '',
+              subject: msg.subject || '', duration_minutes: intent.durationMinutes,
+              status: 'pending', proposed_slots: JSON.stringify(slots),
+              urgency: intent.urgency, requested_time_text: intent.requestedTimeText,
+            });
+            await stmts.insertLog.run(email, 'blue', `Meeting request detected from ${msg.from_name || msg.from_addr} — slots proposed for review`);
+          } catch (err) {
+            console.error('[booking] meeting-intent detection failed:', err.message);
+          }
         }));
       }
     })().catch(() => {});
     const toArchive = [];
     for (const m of messages) {
-      const t = await queryOne('SELECT tag FROM emails WHERE id = ?', m.id);
-      if (t?.tag === 'promo' || t?.tag === 'spam') toArchive.push(m.gmail_id);
+      const t = tagById.get(m.id);
+      if (t === 'promo' || t === 'spam') toArchive.push(m.gmail_id);
     }
     if (toArchive.length > 0) {
       // Check whether the user has disabled auto-archive
