@@ -31,7 +31,7 @@ function getAuthUrl(stateEmail) {
   const oAuth2Client = createOAuth2Client();
   return oAuth2Client.generateAuthUrl({
     access_type: 'offline',
-    prompt:      'consent',
+    prompt:      'select_account consent',
     scope:       SCOPES,
     state:       stateEmail,
   });
