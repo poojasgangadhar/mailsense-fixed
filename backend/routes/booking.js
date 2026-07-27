@@ -148,23 +148,78 @@ router.post('/appointments/:id/cancel', requireAuth, async (req, res) => {
     const email = req.user.email;
     const appt = await stmts.getAppointment.get(req.params.id, email);
     if (!appt) return res.status(404).json({ error: 'Appointment not found' });
-    if (appt.calendar_event_id) {
-      const tokenRow = await stmts.getToken.get(email);
-      if (tokenRow) {
-        await calendarHelper.deleteEvent(tokenRow, appt.calendar_event_id).catch(err =>
-          console.error('[appointments:cancel] calendar delete failed:', err.message)
-        );
-      }
+    const tokenRow = await stmts.getToken.get(email);
+    if (appt.calendar_event_id && tokenRow) {
+      await calendarHelper.deleteEvent(tokenRow, appt.calendar_event_id).catch(err =>
+        console.error('[appointments:cancel] calendar delete failed:', err.message)
+      );
     }
     await stmts.updateAppointmentStatus.run({
       id: appt.id, user_email: email, status: 'cancelled',
       confirmed_start: appt.confirmed_start, confirmed_end: appt.confirmed_end,
       meet_link: appt.meet_link, calendar_event_id: appt.calendar_event_id,
     });
+    if (tokenRow && appt.confirmed_start) {
+      const saveToken = (t) => stmts.upsertToken.run({ user_email: email, ...t });
+      const settingsRow = await stmts.getAvailability.get(email);
+      const settings = schedulingHelper.parseSettingsRow(settingsRow);
+      const when = new Date(appt.confirmed_start).toLocaleString('en-US', {
+        weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: settings.timezone,
+      });
+      const body = `Hi ${appt.contact_name || ''},\n\nYour meeting scheduled for ${when} (${settings.timezone}) has been cancelled.\n\nFeel free to reply if you'd like to find a new time.\n`;
+      try {
+        await gmailHelper.sendEmail(tokenRow, { from: email, to: appt.contact_email, subject: `Cancelled: ${appt.subject || 'Meeting'}`, body }, saveToken);
+      } catch (mailErr) {
+        console.error('[appointments:cancel] notification email failed:', mailErr.message);
+      }
+    }
+    await stmts.insertLog.run(email, 'amber', `Appointment with ${appt.contact_email} cancelled`);
     res.json({ success: true });
   } catch (err) {
     console.error('[appointments:cancel]', err);
     res.status(500).json({ error: 'Failed to cancel appointment' });
+  }
+});
+
+// ── Reschedule a previously confirmed appointment to a new time ──
+router.post('/appointments/:id/reschedule', requireAuth, async (req, res) => {
+  try {
+    const email = req.user.email;
+    const { startISO, endISO } = req.body;
+    if (!startISO || !endISO) return res.status(400).json({ error: 'startISO and endISO are required' });
+    const appt = await stmts.getAppointment.get(req.params.id, email);
+    if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+    if (!appt.calendar_event_id) return res.status(400).json({ error: 'This appointment has no linked calendar event to reschedule' });
+
+    const tokenRow = await stmts.getToken.get(email);
+    if (!tokenRow) return res.status(400).json({ error: 'Gmail/Calendar not connected' });
+    const saveToken = (t) => stmts.upsertToken.run({ user_email: email, ...t });
+    const settingsRow = await stmts.getAvailability.get(email);
+    const settings = schedulingHelper.parseSettingsRow(settingsRow);
+
+    await calendarHelper.updateEventTime(tokenRow, appt.calendar_event_id, { startISO, endISO, timezone: settings.timezone }, saveToken);
+    await stmts.updateAppointmentStatus.run({
+      id: appt.id, user_email: email, status: 'confirmed',
+      confirmed_start: startISO, confirmed_end: endISO,
+      meet_link: appt.meet_link, calendar_event_id: appt.calendar_event_id,
+    });
+
+    const when = new Date(startISO).toLocaleString('en-US', {
+      weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: settings.timezone,
+    });
+    const body = `Hi ${appt.contact_name || ''},\n\nYour meeting has been rescheduled to ${when} (${settings.timezone}).\n` +
+      (appt.meet_link ? `Google Meet link (unchanged): ${appt.meet_link}\n` : '') +
+      `\nLet me know if this doesn't work for you.\n`;
+    try {
+      await gmailHelper.sendEmail(tokenRow, { from: email, to: appt.contact_email, subject: `Rescheduled: ${appt.subject || 'Meeting'}`, body }, saveToken);
+    } catch (mailErr) {
+      console.error('[appointments:reschedule] notification email failed:', mailErr.message);
+    }
+    await stmts.insertLog.run(email, 'blue', `Appointment with ${appt.contact_email} rescheduled`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[appointments:reschedule]', err);
+    res.status(500).json({ error: 'Failed to reschedule appointment' });
   }
 });
 

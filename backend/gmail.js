@@ -211,6 +211,29 @@ function buildRawEmail({ from, to, subject, replyToMessageId, replyToThreadId, b
   return Buffer.from(raw).toString('base64url');
 }
 
+// ── Send a standalone email (not a reply to an existing thread) ──
+// Used for meeting reminders, daily agendas, and cancellation/reschedule notices.
+function buildStandaloneEmail({ from, to, subject, body }) {
+  const lines = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    'MIME-Version: 1.0',
+    '',
+    body,
+  ];
+  return Buffer.from(lines.join('\r\n')).toString('base64url');
+}
+
+async function sendEmail(tokenRow, { from, to, subject, body }, saveToken) {
+  const auth  = buildAuthorizedClient(tokenRow, saveToken);
+  const gmail = google.gmail({ version: 'v1', auth });
+  const raw = buildStandaloneEmail({ from, to, subject, body });
+  const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+  return res.data;
+}
+
 // ── Send a reply immediately (Fast Mode) ─────────────────────
 async function sendReply(tokenRow, { from, to, subject, messageId, threadId, body }, saveToken) {
   const auth  = buildAuthorizedClient(tokenRow, saveToken);
@@ -337,6 +360,7 @@ module.exports = {
   buildAuthorizedClient,
   fetchMessages,
   sendReply,
+  sendEmail,
   saveDraft,
   trashMessages,
   archiveMessages,

@@ -1,8 +1,57 @@
 // backend/scheduler.js
 const { stmts, recomputeStats, markEmailsDeleted, query, queryOne, exec } = require('./db');
 const gmailHelper = require('./gmail');
+const schedulingHelper = require('./scheduling');
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+// ── Daily meeting agenda + reminder ────────────────────────────
+// Runs once per day (piggybacking on the existing Vercel cron, since
+// free-tier cron frequency is limited to once/day). Sends each user a
+// summary of today's confirmed meetings — this doubles as the "meeting
+// reminder" for anything scheduled later that day.
+async function sendDailyAgenda(userEmail) {
+  const todayKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const lastSent = await queryOne(
+    "SELECT setting_value FROM user_settings WHERE user_email = ? AND setting_key = 'last_agenda_sent_date'", userEmail
+  );
+  if (lastSent?.setting_value === todayKey) return; // already sent today
+
+  const settingsRow = await stmts.getAvailability.get(userEmail);
+  const settings = schedulingHelper.parseSettingsRow(settingsRow);
+  const tokenRow = await stmts.getToken.get(userEmail);
+  if (!tokenRow) return; // no Gmail connected, nothing to send from
+
+  const rows = await query(
+    "SELECT * FROM appointments WHERE user_email = ? AND status = 'confirmed' ORDER BY confirmed_start ASC", userEmail
+  );
+  const now = new Date();
+  const todaysMeetings = rows.filter(r => {
+    if (!r.confirmed_start) return false;
+    const d = new Date(r.confirmed_start);
+    return d.toDateString() === now.toDateString() && d >= now;
+  });
+
+  // Mark as sent regardless (once/day, even if zero meetings) so we don't recheck all day
+  await exec(
+    "INSERT INTO user_settings (user_email, setting_key, setting_value) VALUES (?, 'last_agenda_sent_date', ?) ON CONFLICT(user_email, setting_key) DO UPDATE SET setting_value = excluded.setting_value",
+    userEmail, todayKey
+  );
+  if (todaysMeetings.length === 0) return;
+
+  const saveToken = (t) => stmts.upsertToken.run({ user_email: userEmail, ...t });
+  const lines = todaysMeetings.map(m => {
+    const time = new Date(m.confirmed_start).toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: settings.timezone });
+    return `• ${time} — ${m.contact_name || m.contact_email} (${m.subject || 'Meeting'})${m.meet_link ? ` — ${m.meet_link}` : ''}`;
+  });
+  const body = `Good morning! Here's your agenda for today (${todaysMeetings.length} meeting${todaysMeetings.length > 1 ? 's' : ''}):\n\n${lines.join('\n')}\n`;
+  try {
+    await gmailHelper.sendEmail(tokenRow, { from: userEmail, to: userEmail, subject: `Your agenda for today (${todaysMeetings.length} meeting${todaysMeetings.length > 1 ? 's' : ''})`, body }, saveToken);
+    await stmts.insertLog.run(userEmail, 'blue', `Daily agenda sent — ${todaysMeetings.length} meeting${todaysMeetings.length > 1 ? 's' : ''} today`);
+  } catch (err) {
+    console.error(`[Scheduler] Daily agenda email failed for ${userEmail}:`, err.message);
+  }
+}
 
 async function getAutoDeleteSettings(userEmail) {
   try {
@@ -99,6 +148,8 @@ async function runScheduler() {
   for (const { user_email } of users) {
     try { await runForUser(user_email); }
     catch (err) { console.error(`[Scheduler] Error processing ${user_email}:`, err.message); }
+    try { await sendDailyAgenda(user_email); }
+    catch (err) { console.error(`[Scheduler] Daily agenda error for ${user_email}:`, err.message); }
   }
   console.log(`[Scheduler] Done. Processed ${users.length} user(s).`);
 }
