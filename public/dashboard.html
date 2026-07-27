@@ -862,6 +862,8 @@ function App(){
   const [logs,setLogs]=useState([]);
   const [appointments,setAppointments]=useState([]);
   const [apptLoading,setApptLoading]=useState(false);
+  const [confirmedAppts,setConfirmedAppts]=useState([]);
+  const [confirmedLoading,setConfirmedLoading]=useState(false);
   const [stats,setStats]=useState({total:0,important:0,promo:0,spam:0,social:0,updates:0,replied:0});
   const [selected,setSelected]=useState([]);
   const [delCat,setDelCat]=useState('');
@@ -1161,7 +1163,7 @@ function App(){
     catch{}
   };
   useEffect(()=>{if(nav==='settings')loadPasskeys();},[nav]);
-  useEffect(()=>{if(nav==='appointments')loadAppointments();},[nav]);
+  useEffect(()=>{if(nav==='appointments'){loadAppointments();loadConfirmed();}},[nav]);
   const loadAppointments=async()=>{
     setApptLoading(true);
     try{
@@ -1171,6 +1173,15 @@ function App(){
     }catch{t('Failed to load appointments','red');}
     setApptLoading(false);
   };
+  const loadConfirmed=async()=>{
+    setConfirmedLoading(true);
+    try{
+      const res=await authFetch('/api/appointments?status=confirmed');
+      const d=await res.json();
+      setConfirmedAppts(d.appointments||[]);
+    }catch{t('Failed to load confirmed meetings','red');}
+    setConfirmedLoading(false);
+  };
   const approveAppointment=async(id,slot)=>{
     try{
       const res=await authFetch(`/api/appointments/${id}/approve`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({startISO:slot.startISO,endISO:slot.endISO})});
@@ -1178,6 +1189,7 @@ function App(){
       if(!res.ok)throw new Error(d.error||'Failed');
       t('Meeting booked and confirmation sent','green');
       setAppointments(prev=>prev.filter(a=>a.id!==id));
+      loadConfirmed();
     }catch(e){t(e.message||'Failed to book meeting','red');}
   };
   const declineAppointment=async(id)=>{
@@ -1186,6 +1198,32 @@ function App(){
       t('Appointment declined','amber');
       setAppointments(prev=>prev.filter(a=>a.id!==id));
     }catch{t('Failed to decline','red');}
+  };
+  const cancelAppointment=async(id)=>{
+    if(!confirm('Cancel this meeting? The contact will be notified by email.'))return;
+    try{
+      const res=await authFetch(`/api/appointments/${id}/cancel`,{method:'POST'});
+      const d=await res.json();
+      if(!res.ok)throw new Error(d.error||'Failed');
+      t('Meeting cancelled, contact notified','amber');
+      setConfirmedAppts(prev=>prev.filter(a=>a.id!==id));
+    }catch(e){t(e.message||'Failed to cancel meeting','red');}
+  };
+  const rescheduleAppointment=async(id)=>{
+    const newTime=prompt('Enter new start time (e.g. 2026-08-01T15:00) — your local time:');
+    if(!newTime)return;
+    const start=new Date(newTime);
+    if(isNaN(start.getTime())){t('Could not understand that date/time','red');return;}
+    const appt=confirmedAppts.find(a=>a.id===id);
+    const durationMin=appt?.duration_minutes||30;
+    const end=new Date(start.getTime()+durationMin*60000);
+    try{
+      const res=await authFetch(`/api/appointments/${id}/reschedule`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({startISO:start.toISOString(),endISO:end.toISOString()})});
+      const d=await res.json();
+      if(!res.ok)throw new Error(d.error||'Failed');
+      t('Meeting rescheduled, contact notified','green');
+      loadConfirmed();
+    }catch(e){t(e.message||'Failed to reschedule meeting','red');}
   };
 
   const registerPasskey=async()=>{
@@ -1550,6 +1588,26 @@ function App(){
                   ))}
                 </div>
                 <button className="action-btn danger" style={{fontSize:'.72rem'}} onClick={()=>declineAppointment(a.id)}>{I.trash} Decline</button>
+              </div>
+            ))}
+          </div>
+        </div>}
+
+        {nav==='appointments'&&<div className="panel">
+          <div className="panel-header"><div className="panel-title">Confirmed Meetings</div><span className="panel-badge">{confirmedAppts.length}</span><button className="action-btn" style={{padding:'3px 9px',fontSize:'.7rem'}} onClick={loadConfirmed}>Refresh</button></div>
+          <div style={{maxHeight:'50vh',overflowY:'auto',padding:'10px 14px',display:'flex',flexDirection:'column',gap:10}}>
+            {confirmedLoading&&<div className="empty">Loading…</div>}
+            {!confirmedLoading&&confirmedAppts.length===0&&<div className="empty">No upcoming confirmed meetings yet.</div>}
+            {confirmedAppts.map(a=>(
+              <div key={a.id} style={{background:'var(--surface2)',border:'1px solid var(--border)',borderRadius:12,padding:12}}>
+                <div style={{fontWeight:600,color:'var(--text)'}}>{a.contact_name||a.contact_email}</div>
+                <div style={{fontSize:'.78rem',color:'var(--text-muted)',marginBottom:6}}>{a.subject} · {a.duration_minutes} min</div>
+                {a.confirmed_start&&<div style={{fontSize:'.8rem',color:'var(--accent)',fontWeight:600,marginBottom:6}}>{new Date(a.confirmed_start).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</div>}
+                {a.meet_link&&<div style={{fontSize:'.75rem',marginBottom:8}}><a href={a.meet_link} target="_blank" rel="noopener noreferrer" style={{color:'var(--teal)'}}>{a.meet_link}</a></div>}
+                <div style={{display:'flex',gap:6}}>
+                  <button className="action-btn" style={{fontSize:'.72rem'}} onClick={()=>rescheduleAppointment(a.id)}>{I.calendar||I.log} Reschedule</button>
+                  <button className="action-btn danger" style={{fontSize:'.72rem'}} onClick={()=>cancelAppointment(a.id)}>{I.trash} Cancel</button>
+                </div>
               </div>
             ))}
           </div>
