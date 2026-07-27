@@ -78,6 +78,12 @@ router.get('/oauth2callback', async (req, res) => {
       token_expiry: tokens.expiry_date ? tokens.expiry_date.toString() : null,
       scope: tokens.scope || '',
     });
+    // Every new authorization is treated as a fresh connection — clear any
+    // cached mail/stats from a previously connected Gmail account so that
+    // switching accounts (with or without an explicit "Disconnect" first)
+    // never leaves stale messages mixed into the new account's inbox.
+    await exec('DELETE FROM emails WHERE user_email = ?', email);
+    await exec('DELETE FROM agent_stats WHERE user_email = ?', email);
     await stmts.insertLog.run(email, 'green', `Gmail connected successfully for <strong>${email}</strong>`);
     res.redirect(makeRedirect('dashboard.html', 'gmail=connected'));
   } catch (err) {
@@ -96,7 +102,7 @@ router.post('/gmail-status', requireAuth, async (req, res) => {
   res.json({
     connected: true,
     emails: emailRows.map(formatEmail),
-    stats: { total: stats.total, important: stats.important, promo: stats.promo, spam: stats.spam, replied: stats.replied },
+    stats: { total: stats.total, important: stats.important, promo: stats.promo, spam: stats.spam, social: stats.social, updates: stats.updates, replied: stats.replied },
     logs: logs.map(l => ({ id: l.id, time: l.created_at.substring(11, 16), dot: l.dot_color, text: l.message })),
   });
 });
