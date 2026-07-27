@@ -2,7 +2,7 @@
 const express = require('express');
 const { db, stmts, recomputeStats, markEmailsDeleted, queryOne, query, exec } = require('../db');
 const gmailHelper = require('../gmail');
-const { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent } = require('../mistral');
+const { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent, needsReply } = require('../mistral');
 const schedulingHelper = require('../scheduling');
 const calendarHelper = require('../calendar');
 const { requireAuth, verifyToken } = require('../middleware/auth');
@@ -256,8 +256,10 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
     const stats = await recomputeStats(email);
     await stmts.insertLog.run(email, 'green', `Fetched <strong>${messages.length}</strong> emails (${newCount} new, classified)`);
     const allEmails = await stmts.getEmails.all(email);
+    const repliedThreadIds = new Set(allEmails.filter(e => e.replied && e.thread_id).map(e => e.thread_id));
     const pendingImportant = allEmails
       .filter(e => e.tag === 'important' && !e.replied && !e.deleted && !e.archived)
+      .filter(e => !e.thread_id || !repliedThreadIds.has(e.thread_id)) // don't re-reply within an already-answered conversation
       .filter(e => !isNoReplyEmail(e.from_addr, e.subject, e.snippet))
       .filter(e => {
         // Only reply to emails from real people (personal email domains)
@@ -311,6 +313,15 @@ router.post('/gmail-reply', requireAuth, async (req, res) => {
   const emailRow = await queryOne('SELECT * FROM emails WHERE id = ? AND user_email = ?', emailId, userEmail);
   if (!emailRow) return res.status(404).json({ error: 'Email not found.' });
   if (emailRow.replied) return res.json({ success: true, skipped: true, message: 'Already replied.' });
+  if (emailRow.thread_id) {
+    const threadReplied = await stmts.hasThreadReply.get(userEmail, emailRow.thread_id);
+    if (threadReplied) {
+      // We've already auto-replied somewhere in this conversation — mark this
+      // message replied too so it stops showing up as pending, but don't send again.
+      await stmts.markEmailReplied.run(emailId);
+      return res.json({ success: true, skipped: true, message: 'Already replied in this conversation.' });
+    }
+  }
   if (isNoReplyEmail(emailRow.from_addr, emailRow.subject, emailRow.snippet)) {
     return res.json({ success: false, skipped: true, message: 'Skipped — automated/no-reply sender.' });
   }
@@ -327,6 +338,10 @@ router.post('/gmail-reply', requireAuth, async (req, res) => {
     return res.json({ success: false, skipped: true, message: 'Skipped — platform/service email.' });
   }
   try {
+    const shouldReply = await needsReply({ subject: emailRow.subject, snippet: emailRow.snippet, fromAddr: emailRow.from_addr, fromName: emailRow.from_name });
+    if (!shouldReply) {
+      return res.json({ success: false, skipped: true, message: 'Skipped — doesn\'t need a reply (informational/FYI).' });
+    }
     const userRow = await stmts.getUserByEmail.get(userEmail);
     const senderFirstName = userRow?.first_name || '';
     const replyBody = await generateReply({ subject: emailRow.subject, snippet: emailRow.snippet, fromName: emailRow.from_name, replyTemplate, senderFirstName });

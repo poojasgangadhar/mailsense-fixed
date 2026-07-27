@@ -239,6 +239,34 @@ function ruleBasedMeetingDetect(subject = '', snippet = '', fromName = '') {
   return { isMeeting, durationMinutes: 30, requestedTimeText: '', urgency: 'normal', contactName: fromName || '' };
 }
 
+// ── Does this email actually need a reply? ────────────────────
+// Guards auto-reply/draft generation against emails that are tagged
+// 'important' but are purely informational (FYI notes, receipts,
+// automated status updates, "thanks, no action needed" etc.).
+async function needsReply({ subject, snippet, fromAddr, fromName }) {
+  if (!getMistralKey()) return true; // fail open — don't block replies if AI unavailable
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'You decide whether an email genuinely expects a reply from the recipient.\n' +
+        'Respond with ONLY the word "yes" or "no", nothing else.\n' +
+        'Answer "no" for: purely informational updates, FYI notes, receipts/confirmations, ' +
+        'automated status notifications, "thanks!"/acknowledgment-only messages, or anything ' +
+        'where a response is not expected.\n' +
+        'Answer "yes" for genuine questions, requests, or messages awaiting a decision/response.',
+    },
+    { role: 'user', content: `From: ${fromName || ''} <${fromAddr || ''}>\nSubject: ${subject || ''}\nBody: ${(snippet || '').slice(0, 400)}` },
+  ];
+  try {
+    const result = await mistralChat(messages, 5);
+    return !result.toLowerCase().includes('no');
+  } catch (err) {
+    console.error('[Mistral] needsReply error:', err.message);
+    return true; // fail open
+  }
+}
+
 // ── Generate reply ────────────────────────────────────────────
 // IMPORTANT: senderFirstName / senderLastName must be the user's
 // actual signup name pulled from the DB by the caller (e.g. the
@@ -318,4 +346,4 @@ async function generateReply({
   }
 }
 
-module.exports = { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent };
+module.exports = { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent, needsReply };
