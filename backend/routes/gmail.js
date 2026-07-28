@@ -264,9 +264,18 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
     await stmts.insertLog.run(email, 'green', `Fetched <strong>${messages.length}</strong> emails (${newCount} new, classified)`);
     const allEmails = await stmts.getEmails.all(email);
     const repliedThreadIds = new Set(allEmails.filter(e => e.replied && e.thread_id).map(e => e.thread_id));
+    const newlyClassifiedIds = new Set(toClassify.map(m => m.id)); // classification + meeting-detection for these is still running in the background
+    let appointmentEmailIds = new Set();
+    if (allEmails.length) {
+      const ph = allEmails.map(() => '?').join(',');
+      const apptRows = await query(`SELECT DISTINCT email_id FROM appointments WHERE user_email = ? AND email_id IN (${ph})`, email, ...allEmails.map(e => e.id));
+      appointmentEmailIds = new Set(apptRows.map(r => r.email_id));
+    }
     const pendingImportant = allEmails
       .filter(e => e.tag === 'important' && !e.replied && !e.deleted && !e.archived)
       .filter(e => (e.from_addr || '').trim().toLowerCase() !== email.trim().toLowerCase()) // never auto-reply to yourself — prevents an infinite reply-to-your-own-reply loop
+      .filter(e => !newlyClassifiedIds.has(e.id)) // still being classified/checked for meeting intent in the background — wait for next fetch
+      .filter(e => !appointmentEmailIds.has(e.id)) // this email is a meeting request being handled via the Appointments flow instead
       .filter(e => !e.thread_id || !repliedThreadIds.has(e.thread_id)) // don't re-reply within an already-answered conversation
       .filter(e => !isNoReplyEmail(e.from_addr, e.subject, e.snippet))
       .filter(e => !matchesNoReplyPattern(e.subject, e.snippet)) // OTPs, paper/journal invites, "no action needed" etc.
@@ -322,6 +331,10 @@ router.post('/gmail-reply', requireAuth, async (req, res) => {
   const emailRow = await queryOne('SELECT * FROM emails WHERE id = ? AND user_email = ?', emailId, userEmail);
   if (!emailRow) return res.status(404).json({ error: 'Email not found.' });
   if (emailRow.replied) return res.json({ success: true, skipped: true, message: 'Already replied.' });
+  const existingAppt = await stmts.getAppointmentByEmail.get(emailId, userEmail);
+  if (existingAppt) {
+    return res.json({ success: false, skipped: true, message: 'Skipped — this is a meeting request, handle it from the Appointments tab instead.' });
+  }
   if ((emailRow.from_addr || '').trim().toLowerCase() === userEmail.trim().toLowerCase()) {
     // Never reply to yourself — prevents an infinite self-reply loop (e.g. when testing by emailing your own connected account).
     await stmts.markEmailReplied.run(emailId);
