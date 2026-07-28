@@ -872,6 +872,7 @@ function App(){
   const [collapsed,setCollapsed]=useState(false);
   const [theme,setTheme]=useState(()=>localStorage.getItem('ms_theme')||'dark');
   const [gmailConn,setGmailConn]=useState(false);
+  const [calendarConnected,setCalendarConnected]=useState(false);
   const [notifs,setNotifs]=useState(NOTIFS);
   const [loading,setLoading]=useState(false);
   const [fetching,setFetching]=useState(false);
@@ -944,7 +945,7 @@ function App(){
   },[gmailConn]);
 
   const loadStatus=async()=>{
-   try{const res=await authFetch('/api/gmail-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});const d=await res.json();if(d.connected){setGmailConn(true);if(d.emails)setEmails(d.emails);if(d.stats)setStats(d.stats);if(d.logs)setLogs(d.logs);}}catch{} 
+   try{const res=await authFetch('/api/gmail-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});const d=await res.json();if(d.connected){setGmailConn(true);setCalendarConnected(!!d.calendarConnected);if(d.emails)setEmails(d.emails);if(d.stats)setStats(d.stats);if(d.logs)setLogs(d.logs);}}catch{} 
   };
 
   const addLog=(dot,text)=>{const time=new Date().toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit',hour12:false});setLogs(l=>[{id:Date.now(),time,dot,text},...l].slice(0,80));};
@@ -1311,7 +1312,7 @@ function App(){
       window.location.href = `/api/gmail-auth?token=${encodeURIComponent(jwtToken)}`;
     }
   };
-  const disconnectGmail=async()=>{ try{await authFetch('/api/gmail-disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});setGmailConn(false);setEmails([]);setStats({total:0,important:0,promo:0,spam:0,social:0,updates:0,replied:0});addLog('amber','Gmail disconnected');t('Gmail disconnected','amber');}catch{t('Failed to disconnect','red');} };
+  const disconnectGmail=async()=>{ try{await authFetch('/api/gmail-disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});setGmailConn(false);setCalendarConnected(false);setEmails([]);setStats({total:0,important:0,promo:0,spam:0,social:0,updates:0,replied:0});addLog('amber','Gmail disconnected');t('Gmail disconnected','amber');}catch{t('Failed to disconnect','red');} };
 
   const toggleSel=id=>setSelected(s=>s.includes(id)?s.filter(x=>x!==id):[...s,id]);
   const selAll=()=>setSelected(filteredEmails(nav).map(e=>e.id));
@@ -1570,6 +1571,14 @@ function App(){
         ))}
 
         {/* ══ LOGS ══ */}
+        {nav==='appointments'&&!calendarConnected&&<div className="panel" style={{padding:14,borderColor:'var(--amber)'}}>
+          <div style={{fontWeight:600,color:'var(--amber)',marginBottom:4}}>⚠️ Calendar access not connected</div>
+          <div style={{fontSize:'.85rem',color:'var(--text-muted)',marginBottom:10}}>The appointment booking module needs Calendar permission, which is granted alongside your Gmail connection. Disconnect and reconnect Gmail below to enable it — you'll see Google's permission screen include Calendar access.</div>
+          <button className="disconnect-btn" onClick={disconnectGmail}>Disconnect Gmail (then reconnect to grant Calendar access)</button>
+        </div>}
+        {nav==='appointments'&&calendarConnected&&<div className="panel" style={{padding:'10px 14px',borderColor:'var(--green)'}}>
+          <div style={{fontSize:'.85rem',color:'var(--green)',fontWeight:600}}>✓ Calendar connected</div>
+        </div>}
         {nav==='appointments'&&<div className="panel">
           <div className="panel-header"><div className="panel-title">Appointments</div><span className="panel-badge">{appointments.length}</span><button className="action-btn" style={{padding:'3px 9px',fontSize:'.7rem'}} onClick={loadAppointments}>Refresh</button></div>
           <div style={{maxHeight:'65vh',overflowY:'auto',padding:'10px 14px',display:'flex',flexDirection:'column',gap:10}}>

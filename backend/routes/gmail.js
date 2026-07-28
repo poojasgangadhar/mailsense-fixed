@@ -101,6 +101,7 @@ router.post('/gmail-status', requireAuth, async (req, res) => {
   const logs = await stmts.getLogs.all(email);
   res.json({
     connected: true,
+    calendarConnected: calendarHelper.hasCalendarScope(tokenRow),
     emails: emailRows.map(formatEmail),
     stats: { total: stats.total, important: stats.important, promo: stats.promo, spam: stats.spam, social: stats.social, updates: stats.updates, replied: stats.replied },
     logs: logs.map(l => ({ id: l.id, time: l.created_at.substring(11, 16), dot: l.dot_color, text: l.message })),
