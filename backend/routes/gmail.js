@@ -167,6 +167,17 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
     // Step 2: Classify new emails in parallel batches of 5 (fire and forget to avoid timeout)
     const CLASS_BATCH = 5;
     (async () => {
+      // Resolve once per fetch (same for every message) instead of per-email.
+      const calendarTokenRow = await stmts.getToken.get(email);
+      const calendarReady = !!calendarTokenRow && calendarHelper.hasCalendarScope(calendarTokenRow);
+      if (toClassify.length && !calendarReady) {
+        await stmts.insertLog.run(email, 'amber',
+          'Meeting detection skipped — Calendar access not granted yet. Disconnect and reconnect Gmail to enable the appointment booking module.'
+        );
+      }
+      const saveToken = (t) => stmts.upsertToken.run({ user_email: email, ...t });
+      const settingsRow = calendarReady ? await stmts.getAvailability.get(email) : null;
+
       for (let i = 0; i < toClassify.length; i += CLASS_BATCH) {
         const batch = toClassify.slice(i, i + CLASS_BATCH);
         await Promise.all(batch.map(async msg => {
@@ -177,6 +188,7 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
 
           // AI Appointment Booking Module (Phase 1) — detect meeting
           // requests and propose real Calendar slots for review.
+          if (!calendarReady) return; // already logged above, nothing more to do per-email
           try {
             const existingAppt = await stmts.getAppointmentByEmail.get(msg.id, email);
             if (existingAppt) return; // already processed this email
@@ -187,13 +199,8 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
             });
             if (!intent.isMeeting) return;
 
-            const tokenRow = await stmts.getToken.get(email);
-            if (!tokenRow || !calendarHelper.hasCalendarScope(tokenRow)) return; // needs reconnect to grant Calendar access
-
-            const saveToken = (t) => stmts.upsertToken.run({ user_email: email, ...t });
-            const settingsRow = await stmts.getAvailability.get(email);
             const { slots } = await schedulingHelper.computeAvailableSlots({
-              tokenRow, saveToken, settingsRow,
+              tokenRow: calendarTokenRow, saveToken, settingsRow,
               durationMinutes: intent.durationMinutes,
               requestedTimeText: intent.requestedTimeText,
             });
