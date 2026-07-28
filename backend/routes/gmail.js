@@ -2,7 +2,7 @@
 const express = require('express');
 const { db, stmts, recomputeStats, markEmailsDeleted, queryOne, query, exec } = require('../db');
 const gmailHelper = require('../gmail');
-const { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent, needsReply } = require('../mistral');
+const { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent, needsReply, matchesNoReplyPattern } = require('../mistral');
 const schedulingHelper = require('../scheduling');
 const calendarHelper = require('../calendar');
 const { requireAuth, verifyToken } = require('../middleware/auth');
@@ -266,8 +266,10 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
     const repliedThreadIds = new Set(allEmails.filter(e => e.replied && e.thread_id).map(e => e.thread_id));
     const pendingImportant = allEmails
       .filter(e => e.tag === 'important' && !e.replied && !e.deleted && !e.archived)
+      .filter(e => (e.from_addr || '').trim().toLowerCase() !== email.trim().toLowerCase()) // never auto-reply to yourself — prevents an infinite reply-to-your-own-reply loop
       .filter(e => !e.thread_id || !repliedThreadIds.has(e.thread_id)) // don't re-reply within an already-answered conversation
       .filter(e => !isNoReplyEmail(e.from_addr, e.subject, e.snippet))
+      .filter(e => !matchesNoReplyPattern(e.subject, e.snippet)) // OTPs, paper/journal invites, "no action needed" etc.
       .filter(e => {
         // Only reply to emails from real people (personal email domains)
         const addr = (e.from_addr || '').toLowerCase();
@@ -320,6 +322,11 @@ router.post('/gmail-reply', requireAuth, async (req, res) => {
   const emailRow = await queryOne('SELECT * FROM emails WHERE id = ? AND user_email = ?', emailId, userEmail);
   if (!emailRow) return res.status(404).json({ error: 'Email not found.' });
   if (emailRow.replied) return res.json({ success: true, skipped: true, message: 'Already replied.' });
+  if ((emailRow.from_addr || '').trim().toLowerCase() === userEmail.trim().toLowerCase()) {
+    // Never reply to yourself — prevents an infinite self-reply loop (e.g. when testing by emailing your own connected account).
+    await stmts.markEmailReplied.run(emailId);
+    return res.json({ success: true, skipped: true, message: 'Skipped — this is your own sent message.' });
+  }
   if (emailRow.thread_id) {
     const threadReplied = await stmts.hasThreadReply.get(userEmail, emailRow.thread_id);
     if (threadReplied) {

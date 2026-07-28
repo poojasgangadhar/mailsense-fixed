@@ -152,7 +152,7 @@ async function classifyEmail({ subject, snippet, fromAddr, fromName, userOwnEmai
         'You are an email classifier. Classify emails as exactly one of: important, promo, spam, social, or updates.\n\n' +
         'IMPORTANT: Emails from real people needing a reply — colleagues, clients, family, friends, interviewers, direct personal messages.\n\n' +
         'SOCIAL: Notifications from social/professional networks — LinkedIn, Instagram, Facebook, Twitter/X, GitHub, YouTube, WhatsApp, Discord.\n\n' +
-        'UPDATES: Transactional and system emails — OTPs, verification codes, password resets, order confirmations, shipping updates, invoices, receipts, payment confirmations, job alerts (Naukri/Indeed), app notifications, security alerts, account updates, Anthropic/Google/Amazon service emails.\n\n' +
+        'UPDATES: Transactional and system emails — OTPs, verification codes, password resets, order confirmations, shipping updates, invoices, receipts, payment confirmations, job alerts (Naukri/Indeed), app notifications, security alerts, account updates, Anthropic/Google/Amazon service emails, and feedback/survey solicitations (\"help us improve\", \"quick feedback\", \"rate your experience\", crowdsourcing/task-platform notifications).\n\n' +
         'PROMO: Marketing/promotional emails — newsletters, discount offers, sale announcements, marketing campaigns, digests.\n\n' +
         'SPAM: Phishing, scams, unsolicited junk, lottery/prize emails, suspicious links.\n\n' +
         'Respond with ONE word only: important, promo, spam, social, or updates.',
@@ -166,7 +166,7 @@ async function classifyEmail({ subject, snippet, fromAddr, fromName, userOwnEmai
   // Domain-based override — always correct regardless of AI response
   const addrLower = (fromAddr || '').toLowerCase();
   const FORCE_SOCIAL = ['linkedin.com','instagram.com','facebook.com','twitter.com','x.com','github.com','youtube.com','whatsapp.com','discord.com','pinterest.com','snapchat.com','tiktok.com','reddit.com'];
-  const FORCE_UPDATES = ['naukri.com','indeed.com','glassdoor.com','amazon.com','flipkart.com','swiggy.com','zomato.com','paytm.com','phonepe.com','razorpay.com','stripe.com','paypal.com','internshala.com','apna.co','angellist.com','wellfound.com'];
+  const FORCE_UPDATES = ['naukri.com','indeed.com','glassdoor.com','amazon.com','flipkart.com','swiggy.com','zomato.com','paytm.com','phonepe.com','razorpay.com','stripe.com','paypal.com','internshala.com','apna.co','angellist.com','wellfound.com','appen.com','mturk.com','prolific.co','clickworker.com','surveymonkey.com','typeform.com'];
   if (FORCE_SOCIAL.some(d => addrLower.includes(d))) return 'social';
   if (FORCE_UPDATES.some(d => addrLower.includes(d))) return 'updates';
 
@@ -239,11 +239,41 @@ function ruleBasedMeetingDetect(subject = '', snippet = '', fromName = '') {
   return { isMeeting, durationMinutes: 30, requestedTimeText: '', urgency: 'normal', contactName: fromName || '' };
 }
 
+// ── Deterministic "never needs a reply" patterns ───────────────
+// Runs before (and independent of) any AI call, so this works reliably
+// even without a Mistral API key. Catches content that's often tagged
+// 'important' for visibility (academic invites, OTPs) but should never
+// trigger an auto-reply.
+const NO_REPLY_CONTENT_PATTERNS = [
+  // OTP / verification / security codes
+  /\bOTP\b/i, /one[- ]time password/i, /verification code/i, /security code/i,
+  /auth(?:entication)? code/i, /confirmation code/i, /\byour code is\b/i,
+  /do not share this (?:code|otp)/i,
+  // Academic / journal / publication solicitations (often personalized-sounding
+  // but are automated calls-for-papers or predatory-journal invitations)
+  /call for papers?/i, /paper (?:submission|acceptance|invitation)/i,
+  /manuscript (?:submission|accepted|invitation)/i, /peer[- ]review(?:ed)?/i,
+  /journal (?:invitation|submission|publication)/i, /publish(?:ing)? (?:your|this) (?:paper|article|manuscript)/i,
+  /article invitation/i, /conference proceedings/i, /indexing (?:in|with) scopus/i,
+  // Generic automated / no-action-needed signals
+  /this is an automated (?:message|email|notification)/i, /no action (?:is )?required/i,
+  /no reply (?:is )?necessary/i, /do not reply to this email/i,
+  // Feedback/survey solicitations — asking the recipient to fill a form, not converse
+  /help us improve/i, /quick feedback/i, /share your feedback/i, /we('| )?d love your feedback/i,
+  /rate your experience/i, /how did we do/i, /take (?:our|this) (?:quick )?survey/i,
+  /tell us what you think/i, /we value your feedback/i,
+];
+function matchesNoReplyPattern(subject = '', snippet = '') {
+  const text = `${subject} ${snippet}`;
+  return NO_REPLY_CONTENT_PATTERNS.some(re => re.test(text));
+}
+
 // ── Does this email actually need a reply? ────────────────────
 // Guards auto-reply/draft generation against emails that are tagged
 // 'important' but are purely informational (FYI notes, receipts,
 // automated status updates, "thanks, no action needed" etc.).
 async function needsReply({ subject, snippet, fromAddr, fromName }) {
+  if (matchesNoReplyPattern(subject, snippet)) return false; // reliable fast-path, no AI needed
   if (!getMistralKey()) return true; // fail open — don't block replies if AI unavailable
   const messages = [
     {
@@ -346,4 +376,4 @@ async function generateReply({
   }
 }
 
-module.exports = { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent, needsReply };
+module.exports = { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent, needsReply, matchesNoReplyPattern };
