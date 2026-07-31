@@ -864,6 +864,9 @@ function App(){
   const [apptLoading,setApptLoading]=useState(false);
   const [confirmedAppts,setConfirmedAppts]=useState([]);
   const [confirmedLoading,setConfirmedLoading]=useState(false);
+  const [bookingSettings,setBookingSettings]=useState({timezone:'UTC',working_days:[1,2,3,4,5],work_start:'09:00',work_end:'18:00',buffer_minutes:10,default_duration_minutes:30,daily_meeting_limit:8,booking_mode:'approval'});
+  const [bsLoading,setBsLoading]=useState(false);
+  const [bsSaving,setBsSaving]=useState(false);
   const [stats,setStats]=useState({total:0,important:0,promo:0,spam:0,social:0,updates:0,replied:0});
   const [selected,setSelected]=useState([]);
   const [delCat,setDelCat]=useState('');
@@ -1164,7 +1167,32 @@ function App(){
     catch{}
   };
   useEffect(()=>{if(nav==='settings')loadPasskeys();},[nav]);
-  useEffect(()=>{if(nav==='appointments'){loadAppointments();loadConfirmed();}},[nav]);
+  useEffect(()=>{if(nav==='appointments'){loadAppointments();loadConfirmed();loadBookingSettings();}},[nav]);
+  const loadBookingSettings=async()=>{
+    setBsLoading(true);
+    try{
+      const res=await authFetch('/api/booking-settings');
+      const d=await res.json();
+      if(d.settings)setBookingSettings(d.settings);
+    }catch{t('Failed to load booking settings','red');}
+    setBsLoading(false);
+  };
+  const saveBookingSettings=async()=>{
+    setBsSaving(true);
+    try{
+      const res=await authFetch('/api/booking-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(bookingSettings)});
+      if(!res.ok)throw new Error('Failed');
+      t('Booking settings saved','green');
+    }catch{t('Failed to save booking settings','red');}
+    setBsSaving(false);
+  };
+  const toggleWorkingDay=(d)=>{
+    setBookingSettings(prev=>{
+      const has=prev.working_days.includes(d);
+      const next=has?prev.working_days.filter(x=>x!==d):[...prev.working_days,d].sort();
+      return{...prev,working_days:next};
+    });
+  };
   const loadAppointments=async()=>{
     setApptLoading(true);
     try{
@@ -1619,6 +1647,79 @@ function App(){
                 </div>
               </div>
             ))}
+          </div>
+        </div>}
+
+        {nav==='appointments'&&<div className="panel">
+          <div className="panel-header"><div className="panel-title">Booking Settings</div>{bsSaving&&<span style={{fontSize:'.7rem',color:'var(--text-muted)'}}>Saving…</span>}</div>
+          <div style={{padding:'12px 14px',display:'flex',flexDirection:'column',gap:14}}>
+            {bsLoading&&<div className="empty">Loading…</div>}
+            {!bsLoading&&<>
+              <div className="settings-row">
+                <div>
+                  <div className="sr-label">Booking mode</div>
+                  <div className="sr-sub">Auto mode books the first available slot with no review. Approval mode waits for you to pick a slot in the Appointments list above.</div>
+                </div>
+                <label className="toggle-switch">
+                  <input type="checkbox" checked={bookingSettings.booking_mode==='auto'} onChange={e=>setBookingSettings(prev=>({...prev,booking_mode:e.target.checked?'auto':'approval'}))}/>
+                  <span className="toggle-slider"/>
+                </label>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <div className="sr-label">Working days</div>
+                  <div className="sr-sub">Days the AI is allowed to propose meeting slots on.</div>
+                </div>
+                <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                  {[{d:0,l:'Su'},{d:1,l:'Mo'},{d:2,l:'Tu'},{d:3,l:'We'},{d:4,l:'Th'},{d:5,l:'Fr'},{d:6,l:'Sa'}].map(w=>(
+                    <button key={w.d} className="action-btn" style={{padding:'4px 8px',fontSize:'.7rem',background:bookingSettings.working_days.includes(w.d)?'var(--accent)':'var(--surface2)',color:bookingSettings.working_days.includes(w.d)?'#fff':'var(--text-muted)'}} onClick={()=>toggleWorkingDay(w.d)}>{w.l}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <div className="sr-label">Working hours</div>
+                  <div className="sr-sub">Meetings are only proposed inside this daily window (your local timezone).</div>
+                </div>
+                <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                  <input type="time" value={bookingSettings.work_start} onChange={e=>setBookingSettings(prev=>({...prev,work_start:e.target.value}))} style={{background:'var(--surface2)',border:'1px solid var(--border)',borderRadius:6,color:'var(--text)',padding:'4px 6px',fontSize:'.75rem'}}/>
+                  <span style={{color:'var(--text-muted)',fontSize:'.75rem'}}>to</span>
+                  <input type="time" value={bookingSettings.work_end} onChange={e=>setBookingSettings(prev=>({...prev,work_end:e.target.value}))} style={{background:'var(--surface2)',border:'1px solid var(--border)',borderRadius:6,color:'var(--text)',padding:'4px 6px',fontSize:'.75rem'}}/>
+                </div>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <div className="sr-label">Default meeting length</div>
+                  <div className="sr-sub">Used when the requester doesn't specify a duration.</div>
+                </div>
+                <select value={bookingSettings.default_duration_minutes} onChange={e=>setBookingSettings(prev=>({...prev,default_duration_minutes:Number(e.target.value)}))} style={{background:'var(--surface2)',border:'1px solid var(--border)',borderRadius:6,color:'var(--text)',padding:'4px 8px',fontSize:'.75rem'}}>
+                  <option value={15}>15 min</option>
+                  <option value={30}>30 min</option>
+                  <option value={60}>60 min</option>
+                </select>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <div className="sr-label">Buffer time</div>
+                  <div className="sr-sub">Minutes of breathing room required before and after every meeting.</div>
+                </div>
+                <select value={bookingSettings.buffer_minutes} onChange={e=>setBookingSettings(prev=>({...prev,buffer_minutes:Number(e.target.value)}))} style={{background:'var(--surface2)',border:'1px solid var(--border)',borderRadius:6,color:'var(--text)',padding:'4px 8px',fontSize:'.75rem'}}>
+                  <option value={0}>None</option>
+                  <option value={5}>5 min</option>
+                  <option value={10}>10 min</option>
+                  <option value={15}>15 min</option>
+                  <option value={30}>30 min</option>
+                </select>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <div className="sr-label">Daily meeting limit</div>
+                  <div className="sr-sub">Max meetings the AI will book into a single day.</div>
+                </div>
+                <input type="number" min="1" max="20" value={bookingSettings.daily_meeting_limit} onChange={e=>setBookingSettings(prev=>({...prev,daily_meeting_limit:Number(e.target.value)||1}))} style={{width:60,background:'var(--surface2)',border:'1px solid var(--border)',borderRadius:6,color:'var(--text)',padding:'4px 8px',fontSize:'.75rem'}}/>
+              </div>
+              <button className="action-btn" style={{alignSelf:'flex-start',fontSize:'.75rem'}} onClick={saveBookingSettings} disabled={bsSaving}>{bsSaving?'Saving…':'Save booking settings'}</button>
+            </>}
           </div>
         </div>}
 
