@@ -5,6 +5,7 @@ const gmailHelper = require('../gmail');
 const { classifyEmail, generateReply, isNoReplyEmail, detectMeetingIntent, needsReply, matchesNoReplyPattern } = require('../mistral');
 const schedulingHelper = require('../scheduling');
 const calendarHelper = require('../calendar');
+const bookingHelper = require('./booking'); // for confirmAppointment (Auto Mode)
 const { requireAuth, verifyToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -200,7 +201,7 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
             });
             if (!intent.isMeeting) return;
 
-            const { slots } = await schedulingHelper.computeAvailableSlots({
+            const { slots, settings } = await schedulingHelper.computeAvailableSlots({
               tokenRow: calendarTokenRow, saveToken, settingsRow,
               durationMinutes: intent.durationMinutes,
               requestedTimeText: intent.requestedTimeText,
@@ -214,7 +215,48 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
               status: 'pending', proposed_slots: JSON.stringify(slots),
               urgency: intent.urgency, requested_time_text: intent.requestedTimeText,
             });
-            await stmts.insertLog.run(email, 'blue', `Meeting request detected from ${msg.from_name || msg.from_addr} — slots proposed for review`);
+            // Re-fetch to get the row with its DB-assigned id (stmts.run doesn't
+            // return lastInsertRowid) — cheap, and email_id+user_email is unique per email.
+            const appt = await stmts.getAppointmentByEmail.get(msg.id, email);
+
+            if (settings.booking_mode === 'auto') {
+              // Auto Mode: book the earliest available slot immediately —
+              // no human approval step. Reuses the exact same booking logic
+              // (calendar event + confirmation email) as the manual /approve route.
+              try {
+                const best = slots[0];
+                await bookingHelper.confirmAppointment({
+                  appt, startISO: best.startISO, endISO: best.endISO,
+                  tokenRow: calendarTokenRow, settings, saveToken,
+                });
+                await stmts.insertLog.run(email, 'green',
+                  `Auto-booked meeting with ${msg.from_name || msg.from_addr} — confirmation sent`);
+              } catch (bookErr) {
+                console.error('[booking] auto-mode booking failed:', bookErr.message);
+                await stmts.insertLog.run(email, 'amber',
+                  `Auto-booking failed for ${msg.from_name || msg.from_addr} — left pending for manual review`);
+              }
+            } else {
+              // Approval mode (default): reply to the contact with the
+              // proposed times and let the user approve a pick from the dashboard.
+              const timeStrings = schedulingHelper.formatSlotsForEmail(slots, settings.timezone);
+              const proposalBody =
+                `Hi ${msg.from_name || ''},\n\n` +
+                `Happy to find time — here are a few options that work:\n\n` +
+                timeStrings.map((t, i) => `${i + 1}. ${t} (${settings.timezone})`).join('\n') +
+                `\n\nLet me know which works best, or suggest another time, and I'll send a calendar invite.\n`;
+              try {
+                await gmailHelper.sendReply(calendarTokenRow, {
+                  from: email, to: msg.from_addr, subject: `Re: ${msg.subject || 'Meeting'}`,
+                  messageId: msg.id, threadId: msg.thread_id, body: proposalBody,
+                }, saveToken);
+              } catch (mailErr) {
+                console.error('[booking] slot-proposal email failed:', mailErr.message);
+                // Appointment record is already saved as pending — the user
+                // can still review and approve it manually even if this reply failed.
+              }
+              await stmts.insertLog.run(email, 'blue', `Meeting request detected from ${msg.from_name || msg.from_addr} — slots proposed by email, awaiting review`);
+            }
           } catch (err) {
             console.error('[booking] meeting-intent detection failed:', err.message);
           }

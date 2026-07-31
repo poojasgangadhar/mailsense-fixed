@@ -15,6 +15,48 @@ const gmailHelper = require('../gmail');
 
 const router = express.Router();
 
+// ── Shared booking logic: create the real Calendar event (with Meet
+//    link) and email the contact a confirmation. Used by the manual
+//    /approve route below AND by Auto Mode, which calls this directly
+//    from routes/gmail.js right after a slot is picked — skipping the
+//    human-review step entirely when booking_mode === 'auto'.
+async function confirmAppointment({ appt, startISO, endISO, tokenRow, settings, saveToken }) {
+  const { eventId, meetLink } = await calendarHelper.createEvent(tokenRow, {
+    summary: appt.subject || `Meeting with ${appt.contact_name || appt.contact_email}`,
+    description: appt.notes || 'Scheduled via Agentra MailSense',
+    startISO, endISO,
+    timezone: settings.timezone,
+    attendeeEmail: appt.contact_email,
+  }, saveToken);
+
+  await stmts.updateAppointmentStatus.run({
+    id: appt.id, user_email: appt.user_email, status: 'confirmed',
+    confirmed_start: startISO, confirmed_end: endISO,
+    meet_link: meetLink, calendar_event_id: eventId,
+  });
+
+  const when = new Date(startISO).toLocaleString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', timeZone: settings.timezone,
+  });
+  const body =
+    `Hi ${appt.contact_name || ''},\n\n` +
+    `You're confirmed for ${when} (${settings.timezone}).\n` +
+    (meetLink ? `Google Meet link: ${meetLink}\n\n` : '\n') +
+    `Looking forward to it!\n`;
+  try {
+    await gmailHelper.sendReply(tokenRow, {
+      from: appt.user_email, to: appt.contact_email, subject: `Re: ${appt.subject || 'Meeting'}`,
+      messageId: appt.email_id, threadId: appt.thread_id, body,
+    }, saveToken);
+  } catch (mailErr) {
+    console.error('[booking] confirmation email failed:', mailErr.message);
+    // Booking itself already succeeded — don't fail the caller over the email.
+  }
+
+  return { eventId, meetLink };
+}
+
 // ── Get/update this user's availability settings ──────────────
 router.get('/booking-settings', requireAuth, async (req, res) => {
   try {
@@ -83,39 +125,7 @@ router.post('/appointments/:id/approve', requireAuth, async (req, res) => {
     const settingsRow = await stmts.getAvailability.get(email);
     const settings = schedulingHelper.parseSettingsRow(settingsRow);
 
-    const { eventId, meetLink } = await calendarHelper.createEvent(tokenRow, {
-      summary: appt.subject || `Meeting with ${appt.contact_name || appt.contact_email}`,
-      description: appt.notes || 'Scheduled via Agentra MailSense',
-      startISO, endISO,
-      timezone: settings.timezone,
-      attendeeEmail: appt.contact_email,
-    }, saveToken);
-
-    await stmts.updateAppointmentStatus.run({
-      id: appt.id, user_email: email, status: 'confirmed',
-      confirmed_start: startISO, confirmed_end: endISO,
-      meet_link: meetLink, calendar_event_id: eventId,
-    });
-
-    // Send a confirmation reply in the same email thread
-    const when = new Date(startISO).toLocaleString('en-US', {
-      weekday: 'long', month: 'long', day: 'numeric',
-      hour: 'numeric', minute: '2-digit', timeZone: settings.timezone,
-    });
-    const body =
-      `Hi ${appt.contact_name || ''},\n\n` +
-      `You're confirmed for ${when} (${settings.timezone}).\n` +
-      (meetLink ? `Google Meet link: ${meetLink}\n\n` : '\n') +
-      `Looking forward to it!\n`;
-    try {
-      await gmailHelper.sendReply(tokenRow, {
-        from: email, to: appt.contact_email, subject: `Re: ${appt.subject || 'Meeting'}`,
-        messageId: appt.email_id, threadId: appt.thread_id, body,
-      }, saveToken);
-    } catch (mailErr) {
-      console.error('[appointments:approve] confirmation email failed:', mailErr.message);
-      // Booking itself already succeeded — don't fail the request over the email.
-    }
+    const { eventId, meetLink } = await confirmAppointment({ appt, startISO, endISO, tokenRow, settings, saveToken });
 
     await stmts.insertLog.run(email, 'green', `Appointment confirmed with ${appt.contact_email}`);
     res.json({ success: true, meetLink, eventId });
@@ -226,3 +236,4 @@ router.post('/appointments/:id/reschedule', requireAuth, async (req, res) => {
 function safeParse(v) { try { return JSON.parse(v); } catch { return []; } }
 
 module.exports = router;
+module.exports.confirmAppointment = confirmAppointment;
