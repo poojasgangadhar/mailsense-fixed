@@ -133,14 +133,17 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
     // one round-trip per message (this was the main source of slow fetches —
     // 100 emails meant 100+ sequential network calls to Turso before this fix).
     let existingTagById = new Map();
+    let meetingCheckedById = new Map();
     if (messages.length) {
       const ph = messages.map(() => '?').join(',');
-      const rows = await query(`SELECT id, tag FROM emails WHERE id IN (${ph})`, ...messages.map(m => m.id));
+      const rows = await query(`SELECT id, tag, meeting_checked FROM emails WHERE id IN (${ph})`, ...messages.map(m => m.id));
       existingTagById = new Map(rows.map(r => [r.id, r.tag]));
+      meetingCheckedById = new Map(rows.map(r => [r.id, !!r.meeting_checked]));
     }
 
     let newCount = 0;
     const toClassify = [];
+    const toDetectMeeting = [];
     const tagById = new Map(); // reused below for the archive check — avoids querying again
     for (const msg of messages) {
       const existingTag = existingTagById.get(msg.id);
@@ -156,6 +159,13 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
         toClassify.push(msg);
         newCount++;
       }
+      // Meeting-intent detection has its own dedupe (meeting_checked),
+      // independent of whether the email's *tag* is already known — an
+      // email synced on an earlier fetch (so its tag is already set)
+      // still needs to be checked for meeting intent if it never has been.
+      if (!isSocial && !isUpdate && !meetingCheckedById.get(msg.id)) {
+        toDetectMeeting.push(msg);
+      }
       tagById.set(msg.id, tag);
       await stmts.upsertEmail.run({
         id: msg.id, user_email: email, gmail_id: msg.gmail_id, thread_id: msg.thread_id || null,
@@ -166,20 +176,13 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
       });
     }
 
-    // Step 2: Classify new emails in parallel batches of 5 (fire and forget to avoid timeout)
+    // Step 2: Classify new emails, and separately run meeting-intent
+    // detection — in parallel batches of 5 (fire and forget to avoid
+    // timeout). These are two different lists (see above) so an email
+    // that's already tagged from a previous fetch still gets checked
+    // for meeting intent if it never has been.
     const CLASS_BATCH = 5;
     (async () => {
-      // Resolve once per fetch (same for every message) instead of per-email.
-      const calendarTokenRow = await stmts.getToken.get(email);
-      const calendarReady = !!calendarTokenRow && calendarHelper.hasCalendarScope(calendarTokenRow);
-      if (toClassify.length && !calendarReady) {
-        await stmts.insertLog.run(email, 'amber',
-          'Meeting detection skipped — Calendar access not granted yet. Disconnect and reconnect Gmail to enable the appointment booking module.'
-        );
-      }
-      const saveToken = (t) => stmts.upsertToken.run({ user_email: email, ...t });
-      const settingsRow = calendarReady ? await stmts.getAvailability.get(email) : null;
-
       for (let i = 0; i < toClassify.length; i += CLASS_BATCH) {
         const batch = toClassify.slice(i, i + CLASS_BATCH);
         await Promise.all(batch.map(async msg => {
@@ -187,18 +190,36 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
             const tag = await classifyEmail({ subject: msg.subject, snippet: msg.snippet, fromAddr: msg.from_addr, fromName: msg.from_name, userOwnEmail: email });
             await exec('UPDATE emails SET tag = ? WHERE id = ?', tag, msg.id);
           } catch { /* keep default tag */ }
+        }));
+      }
+    })().catch(() => {});
 
-          // AI Appointment Booking Module (Phase 1) — detect meeting
-          // requests and propose real Calendar slots for review.
-          if (!calendarReady) return; // already logged above, nothing more to do per-email
+    (async () => {
+      if (!toDetectMeeting.length) return;
+      // Resolve once per fetch (same for every message) instead of per-email.
+      const calendarTokenRow = await stmts.getToken.get(email);
+      const calendarReady = !!calendarTokenRow && calendarHelper.hasCalendarScope(calendarTokenRow);
+      if (!calendarReady) {
+        await stmts.insertLog.run(email, 'amber',
+          'Meeting detection skipped — Calendar access not granted yet. Disconnect and reconnect Gmail to enable the appointment booking module.'
+        );
+        return; // leave meeting_checked unset so these get retried once Calendar is connected
+      }
+      const saveToken = (t) => stmts.upsertToken.run({ user_email: email, ...t });
+      const settingsRow = await stmts.getAvailability.get(email);
+
+      for (let i = 0; i < toDetectMeeting.length; i += CLASS_BATCH) {
+        const batch = toDetectMeeting.slice(i, i + CLASS_BATCH);
+        await Promise.all(batch.map(async msg => {
           try {
             const existingAppt = await stmts.getAppointmentByEmail.get(msg.id, email);
-            if (existingAppt) return; // already processed this email
+            if (existingAppt) { await stmts.markMeetingChecked.run(msg.id); return; }
 
             const intent = await detectMeetingIntent({
               subject: msg.subject, snippet: msg.snippet, body: msg.body,
               fromAddr: msg.from_addr, fromName: msg.from_name, userOwnEmail: email,
             });
+            await stmts.markMeetingChecked.run(msg.id);
             if (!intent.isMeeting) return;
 
             const { slots, settings } = await schedulingHelper.computeAvailableSlots({
@@ -307,7 +328,7 @@ router.post('/gmail-fetch', requireAuth, async (req, res) => {
     await stmts.insertLog.run(email, 'green', `Fetched <strong>${messages.length}</strong> emails (${newCount} new, classified)`);
     const allEmails = await stmts.getEmails.all(email);
     const repliedThreadIds = new Set(allEmails.filter(e => e.replied && e.thread_id).map(e => e.thread_id));
-    const newlyClassifiedIds = new Set(toClassify.map(m => m.id)); // classification + meeting-detection for these is still running in the background
+    const newlyClassifiedIds = new Set([...toClassify, ...toDetectMeeting].map(m => m.id)); // classification + meeting-detection for these is still running in the background
     let appointmentEmailIds = new Set();
     if (allEmails.length) {
       const ph = allEmails.map(() => '?').join(',');

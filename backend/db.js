@@ -52,7 +52,8 @@ const SCHEMA = `
     from_addr TEXT, from_name TEXT, subject TEXT, snippet TEXT, body TEXT,
     tag TEXT DEFAULT 'important', color TEXT DEFAULT '#4f6ef7',
     replied INTEGER DEFAULT 0, archived INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0,
-    email_time TEXT, internal_date INTEGER DEFAULT 0, fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+    email_time TEXT, internal_date INTEGER DEFAULT 0, fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    meeting_checked INTEGER DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS agent_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL,
@@ -195,6 +196,7 @@ const stmts = {
   getLogs:          prepare('SELECT * FROM agent_logs WHERE user_email = ? ORDER BY id DESC LIMIT 100'),
   upsertStats:      prepare("INSERT INTO agent_stats (user_email, total, important, promo, spam, social, updates, replied) VALUES ($user_email, $total, $important, $promo, $spam, $social, $updates, $replied) ON CONFLICT(user_email) DO UPDATE SET total = excluded.total, important = excluded.important, promo = excluded.promo, spam = excluded.spam, social = excluded.social, updates = excluded.updates, replied = excluded.replied, updated_at = datetime('now')"),
   createAppointment: prepare('INSERT INTO appointments (user_email, email_id, thread_id, contact_email, contact_name, subject, duration_minutes, status, proposed_slots, urgency, requested_time_text) VALUES ($user_email, $email_id, $thread_id, $contact_email, $contact_name, $subject, $duration_minutes, $status, $proposed_slots, $urgency, $requested_time_text)'),
+  markMeetingChecked: prepare('UPDATE emails SET meeting_checked = 1 WHERE id = ?'),
   getAppointment:    prepare('SELECT * FROM appointments WHERE id = ? AND user_email = ?'),
   getAppointmentByEmail: prepare('SELECT * FROM appointments WHERE email_id = ? AND user_email = ?'),
   listAppointments:  prepare("SELECT * FROM appointments WHERE user_email = ? AND status = ? ORDER BY created_at DESC LIMIT 200"),
@@ -209,6 +211,12 @@ const MIGRATIONS = [
   // Add social and updates columns to agent_stats
   "ALTER TABLE agent_stats ADD COLUMN social INTEGER DEFAULT 0",
   "ALTER TABLE agent_stats ADD COLUMN updates INTEGER DEFAULT 0",
+  // Track whether an email has already been run through meeting-intent
+  // detection, independent of whether its AI *tag* is already known —
+  // previously meeting detection incorrectly reused the tag-classification
+  // "is this a new email" check, so any email already synced from an
+  // earlier fetch was never evaluated for meeting intent again.
+  "ALTER TABLE emails ADD COLUMN meeting_checked INTEGER DEFAULT 0",
 ];
 
 const initPromise = db.executeMultiple(SCHEMA)
