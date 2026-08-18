@@ -16,6 +16,7 @@ const DEFAULT_SETTINGS = {
   default_duration_minutes: 30,
   daily_meeting_limit: 8,
   booking_mode: 'approval',
+  meeting_provider: 'google_meet', // 'google_meet' | 'zoom' | 'teams'
 };
 
 function parseSettingsRow(row) {
@@ -29,6 +30,7 @@ function parseSettingsRow(row) {
     default_duration_minutes: row.default_duration_minutes ?? DEFAULT_SETTINGS.default_duration_minutes,
     daily_meeting_limit: row.daily_meeting_limit ?? DEFAULT_SETTINGS.daily_meeting_limit,
     booking_mode: row.booking_mode || DEFAULT_SETTINGS.booking_mode,
+    meeting_provider: row.meeting_provider || DEFAULT_SETTINGS.meeting_provider,
   };
 }
 

@@ -79,6 +79,7 @@ const SCHEMA = `
     proposed_slots TEXT,
     confirmed_start TEXT, confirmed_end TEXT,
     meet_link TEXT, calendar_event_id TEXT,
+    meeting_provider TEXT DEFAULT 'google_meet', provider_meeting_id TEXT,
     urgency TEXT DEFAULT 'normal', requested_time_text TEXT,
     notes TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -94,7 +95,18 @@ const SCHEMA = `
     default_duration_minutes INTEGER NOT NULL DEFAULT 30,
     daily_meeting_limit INTEGER NOT NULL DEFAULT 8,
     booking_mode TEXT NOT NULL DEFAULT 'approval',
+    meeting_provider TEXT NOT NULL DEFAULT 'google_meet',
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS zoom_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL UNIQUE,
+    access_token TEXT NOT NULL, refresh_token TEXT, token_expiry TEXT, zoom_email TEXT,
+    connected_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS teams_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL UNIQUE,
+    access_token TEXT NOT NULL, refresh_token TEXT, token_expiry TEXT, ms_email TEXT,
+    connected_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `;
 
@@ -200,9 +212,15 @@ const stmts = {
   getAppointment:    prepare('SELECT * FROM appointments WHERE id = ? AND user_email = ?'),
   getAppointmentByEmail: prepare('SELECT * FROM appointments WHERE email_id = ? AND user_email = ?'),
   listAppointments:  prepare("SELECT * FROM appointments WHERE user_email = ? AND status = ? ORDER BY created_at DESC LIMIT 200"),
-  updateAppointmentStatus: prepare("UPDATE appointments SET status = $status, confirmed_start = $confirmed_start, confirmed_end = $confirmed_end, meet_link = $meet_link, calendar_event_id = $calendar_event_id, updated_at = datetime('now') WHERE id = $id AND user_email = $user_email"),
+  updateAppointmentStatus: prepare("UPDATE appointments SET status = $status, confirmed_start = COALESCE($confirmed_start, confirmed_start), confirmed_end = COALESCE($confirmed_end, confirmed_end), meet_link = COALESCE($meet_link, meet_link), calendar_event_id = COALESCE($calendar_event_id, calendar_event_id), meeting_provider = COALESCE($meeting_provider, meeting_provider), provider_meeting_id = COALESCE($provider_meeting_id, provider_meeting_id), updated_at = datetime('now') WHERE id = $id AND user_email = $user_email"),
   getAvailability:   prepare('SELECT * FROM availability_settings WHERE user_email = ?'),
-  upsertAvailability: prepare("INSERT INTO availability_settings (user_email, timezone, working_days, work_start, work_end, buffer_minutes, default_duration_minutes, daily_meeting_limit, booking_mode) VALUES ($user_email, $timezone, $working_days, $work_start, $work_end, $buffer_minutes, $default_duration_minutes, $daily_meeting_limit, $booking_mode) ON CONFLICT(user_email) DO UPDATE SET timezone=excluded.timezone, working_days=excluded.working_days, work_start=excluded.work_start, work_end=excluded.work_end, buffer_minutes=excluded.buffer_minutes, default_duration_minutes=excluded.default_duration_minutes, daily_meeting_limit=excluded.daily_meeting_limit, booking_mode=excluded.booking_mode, updated_at=datetime('now')"),
+  upsertAvailability: prepare("INSERT INTO availability_settings (user_email, timezone, working_days, work_start, work_end, buffer_minutes, default_duration_minutes, daily_meeting_limit, booking_mode, meeting_provider) VALUES ($user_email, $timezone, $working_days, $work_start, $work_end, $buffer_minutes, $default_duration_minutes, $daily_meeting_limit, $booking_mode, $meeting_provider) ON CONFLICT(user_email) DO UPDATE SET timezone=excluded.timezone, working_days=excluded.working_days, work_start=excluded.work_start, work_end=excluded.work_end, buffer_minutes=excluded.buffer_minutes, default_duration_minutes=excluded.default_duration_minutes, daily_meeting_limit=excluded.daily_meeting_limit, booking_mode=excluded.booking_mode, meeting_provider=excluded.meeting_provider, updated_at=datetime('now')"),
+  getZoomToken: prepare('SELECT * FROM zoom_tokens WHERE user_email = ?'),
+  upsertZoomToken: prepare('INSERT INTO zoom_tokens (user_email, access_token, refresh_token, token_expiry, zoom_email) VALUES ($user_email, $access_token, $refresh_token, $token_expiry, $zoom_email) ON CONFLICT(user_email) DO UPDATE SET access_token = excluded.access_token, refresh_token = COALESCE(excluded.refresh_token, zoom_tokens.refresh_token), token_expiry = excluded.token_expiry, zoom_email = COALESCE(excluded.zoom_email, zoom_tokens.zoom_email)'),
+  deleteZoomToken: prepare('DELETE FROM zoom_tokens WHERE user_email = ?'),
+  getTeamsToken: prepare('SELECT * FROM teams_tokens WHERE user_email = ?'),
+  upsertTeamsToken: prepare('INSERT INTO teams_tokens (user_email, access_token, refresh_token, token_expiry, ms_email) VALUES ($user_email, $access_token, $refresh_token, $token_expiry, $ms_email) ON CONFLICT(user_email) DO UPDATE SET access_token = excluded.access_token, refresh_token = COALESCE(excluded.refresh_token, teams_tokens.refresh_token), token_expiry = excluded.token_expiry, ms_email = COALESCE(excluded.ms_email, teams_tokens.ms_email)'),
+  deleteTeamsToken: prepare('DELETE FROM teams_tokens WHERE user_email = ?'),
 };
 
 const MIGRATIONS = [
@@ -217,6 +235,11 @@ const MIGRATIONS = [
   // "is this a new email" check, so any email already synced from an
   // earlier fetch was never evaluated for meeting intent again.
   "ALTER TABLE emails ADD COLUMN meeting_checked INTEGER DEFAULT 0",
+  // Meeting-link provider support (Zoom / Microsoft Teams as an
+  // alternative to the default Google Meet link)
+  "ALTER TABLE appointments ADD COLUMN meeting_provider TEXT DEFAULT 'google_meet'",
+  "ALTER TABLE appointments ADD COLUMN provider_meeting_id TEXT",
+  "ALTER TABLE availability_settings ADD COLUMN meeting_provider TEXT NOT NULL DEFAULT 'google_meet'",
 ];
 
 const initPromise = db.executeMultiple(SCHEMA)

@@ -864,9 +864,11 @@ function App(){
   const [apptLoading,setApptLoading]=useState(false);
   const [confirmedAppts,setConfirmedAppts]=useState([]);
   const [confirmedLoading,setConfirmedLoading]=useState(false);
-  const [bookingSettings,setBookingSettings]=useState({timezone:'UTC',working_days:[1,2,3,4,5],work_start:'09:00',work_end:'18:00',buffer_minutes:10,default_duration_minutes:30,daily_meeting_limit:8,booking_mode:'approval'});
+  const [bookingSettings,setBookingSettings]=useState({timezone:'UTC',working_days:[1,2,3,4,5],work_start:'09:00',work_end:'18:00',buffer_minutes:10,default_duration_minutes:30,daily_meeting_limit:8,booking_mode:'approval',meeting_provider:'google_meet'});
   const [bsLoading,setBsLoading]=useState(false);
   const [bsSaving,setBsSaving]=useState(false);
+  const [zoomConnected,setZoomConnected]=useState(false);
+  const [teamsConnected,setTeamsConnected]=useState(false);
   const [stats,setStats]=useState({total:0,important:0,promo:0,spam:0,social:0,updates:0,replied:0});
   const [selected,setSelected]=useState([]);
   const [delCat,setDelCat]=useState('');
@@ -916,6 +918,10 @@ function App(){
   const handleGmailParams=(params)=>{
     if(params.get('gmail')==='connected'){setGmailConn(true);addLog('green','Gmail connected!');t('Gmail connected! Fetching emails…','green');window.history.replaceState({},'',window.location.pathname);setTimeout(()=>fetchEmails(),1200);}
     else if(params.get('gmail')==='error'){t(`Gmail error: ${params.get('reason')||'unknown'}`,'red');window.history.replaceState({},'',window.location.pathname);}
+    else if(params.get('zoom')==='connected'){setZoomConnected(true);addLog('green','Zoom connected!');t('Zoom connected','green');window.history.replaceState({},'',window.location.pathname);}
+    else if(params.get('zoom')==='error'){t(`Zoom error: ${params.get('reason')||'unknown'}`,'red');window.history.replaceState({},'',window.location.pathname);}
+    else if(params.get('teams')==='connected'){setTeamsConnected(true);addLog('green','Microsoft Teams connected!');t('Microsoft Teams connected','green');window.history.replaceState({},'',window.location.pathname);}
+    else if(params.get('teams')==='error'){t(`Microsoft Teams error: ${params.get('reason')||'unknown'}`,'red');window.history.replaceState({},'',window.location.pathname);}
   };
 
   useEffect(()=>{
@@ -1167,7 +1173,25 @@ function App(){
     catch{}
   };
   useEffect(()=>{if(nav==='settings')loadPasskeys();},[nav]);
-  useEffect(()=>{if(nav==='appointments'){loadAppointments();loadConfirmed();loadBookingSettings();}},[nav]);
+  useEffect(()=>{if(nav==='appointments'){loadAppointments();loadConfirmed();loadBookingSettings();loadMeetingProviderStatus();}},[nav]);
+  const loadMeetingProviderStatus=async()=>{
+    try{
+      const res=await authFetch('/api/meeting-providers-status');
+      const d=await res.json();
+      setZoomConnected(!!d.zoomConnected);
+      setTeamsConnected(!!d.teamsConnected);
+    }catch{}
+  };
+  const connectZoom=()=>{ window.location.href = `/api/zoom-auth?token=${encodeURIComponent(jwtToken)}`; };
+  const connectTeams=()=>{ window.location.href = `/api/teams-auth?token=${encodeURIComponent(jwtToken)}`; };
+  const disconnectZoom=async()=>{
+    try{await authFetch('/api/zoom-disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});setZoomConnected(false);addLog('amber','Zoom disconnected');t('Zoom disconnected','amber');}
+    catch{t('Failed to disconnect Zoom','red');}
+  };
+  const disconnectTeams=async()=>{
+    try{await authFetch('/api/teams-disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});setTeamsConnected(false);addLog('amber','Microsoft Teams disconnected');t('Microsoft Teams disconnected','amber');}
+    catch{t('Failed to disconnect Microsoft Teams','red');}
+  };
   const loadBookingSettings=async()=>{
     setBsLoading(true);
     try{
@@ -1640,7 +1664,7 @@ function App(){
                 <div style={{fontWeight:600,color:'var(--text)'}}>{a.contact_name||a.contact_email}</div>
                 <div style={{fontSize:'.78rem',color:'var(--text-muted)',marginBottom:6}}>{a.subject} · {a.duration_minutes} min</div>
                 {a.confirmed_start&&<div style={{fontSize:'.8rem',color:'var(--accent)',fontWeight:600,marginBottom:6}}>{new Date(a.confirmed_start).toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</div>}
-                {a.meet_link&&<div style={{fontSize:'.75rem',marginBottom:8}}><a href={a.meet_link} target="_blank" rel="noopener noreferrer" style={{color:'var(--teal)'}}>{a.meet_link}</a></div>}
+                {a.meet_link&&<div style={{fontSize:'.75rem',marginBottom:8}}>{({google_meet:'Google Meet',zoom:'Zoom',teams:'Microsoft Teams'})[a.meeting_provider]||'Meeting'}: <a href={a.meet_link} target="_blank" rel="noopener noreferrer" style={{color:'var(--teal)'}}>{a.meet_link}</a></div>}
                 <div style={{display:'flex',gap:6}}>
                   <button className="action-btn" style={{fontSize:'.72rem'}} onClick={()=>rescheduleAppointment(a.id)}>{I.calendar||I.log} Reschedule</button>
                   <button className="action-btn danger" style={{fontSize:'.72rem'}} onClick={()=>cancelAppointment(a.id)}>{I.trash} Cancel</button>
@@ -1665,6 +1689,35 @@ function App(){
                   <span className="toggle-slider"/>
                 </label>
               </div>
+              <div className="settings-row">
+                <div>
+                  <div className="sr-label">Meeting link</div>
+                  <div className="sr-sub">Which video-call provider gets added to confirmed meetings.</div>
+                </div>
+                <select value={bookingSettings.meeting_provider} onChange={e=>setBookingSettings(prev=>({...prev,meeting_provider:e.target.value}))} style={{background:'var(--surface2)',border:'1px solid var(--border)',borderRadius:6,color:'var(--text)',padding:'4px 8px',fontSize:'.75rem'}}>
+                  <option value="google_meet">Google Meet</option>
+                  <option value="zoom">Zoom</option>
+                  <option value="teams">Microsoft Teams</option>
+                </select>
+              </div>
+              {bookingSettings.meeting_provider==='zoom'&&<div className="settings-row">
+                <div>
+                  <div className="sr-label">Zoom account</div>
+                  <div className="sr-sub">{zoomConnected?'Connected — new meetings will get a Zoom join link.':'Connect Zoom to generate real join links. Without this, meetings fall back to Google Meet.'}</div>
+                </div>
+                {zoomConnected
+                  ? <button className="disconnect-btn" style={{fontSize:'.7rem'}} onClick={disconnectZoom}>Disconnect Zoom</button>
+                  : <button className="action-btn" style={{fontSize:'.72rem'}} onClick={connectZoom}>Connect Zoom</button>}
+              </div>}
+              {bookingSettings.meeting_provider==='teams'&&<div className="settings-row">
+                <div>
+                  <div className="sr-label">Microsoft Teams account</div>
+                  <div className="sr-sub">{teamsConnected?'Connected — new meetings will get a Teams join link.':'Connect Microsoft Teams to generate real join links. Without this, meetings fall back to Google Meet.'}</div>
+                </div>
+                {teamsConnected
+                  ? <button className="disconnect-btn" style={{fontSize:'.7rem'}} onClick={disconnectTeams}>Disconnect Teams</button>
+                  : <button className="action-btn" style={{fontSize:'.72rem'}} onClick={connectTeams}>Connect Teams</button>}
+              </div>}
               <div className="settings-row">
                 <div>
                   <div className="sr-label">Working days</div>

@@ -74,32 +74,46 @@ async function getFreeBusy(tokenRow, timeMinISO, timeMaxISO, saveToken) {
 }
 
 // ── Create a calendar event with a Google Meet link ───────────
-async function createEvent(tokenRow, { summary, description, startISO, endISO, timezone, attendeeEmail }, saveToken) {
+// ── Create a calendar event, either with an auto-generated Google
+//    Meet link (default) or with an externally-created join link
+//    (Zoom / Microsoft Teams) dropped into the location + description
+//    instead. externalJoinUrl, when provided, skips Google Meet
+//    conferenceData creation entirely — Calendar just becomes the
+//    scheduling record, not the video-call provider.
+async function createEvent(tokenRow, { summary, description, startISO, endISO, timezone, attendeeEmail, externalJoinUrl }, saveToken) {
   const auth = buildAuthorizedClient(tokenRow, saveToken);
   const cal  = google.calendar({ version: 'v3', auth });
 
+  const useGoogleMeet = !externalJoinUrl;
+  const fullDescription = externalJoinUrl
+    ? `${description || ''}\n\nJoin link: ${externalJoinUrl}`.trim()
+    : description;
+
   const res = await cal.events.insert({
     calendarId: 'primary',
-    conferenceDataVersion: 1, // required for Google Meet link generation
+    conferenceDataVersion: useGoogleMeet ? 1 : 0, // only needed for Google Meet link generation
     sendUpdates: 'all',       // emails the attendee automatically
     requestBody: {
       summary,
-      description,
+      description: fullDescription,
       start: { dateTime: startISO, timeZone: timezone },
       end:   { dateTime: endISO,   timeZone: timezone },
       attendees: attendeeEmail ? [{ email: attendeeEmail }] : [],
-      conferenceData: {
-        createRequest: {
-          requestId: `mailsense-${Date.now()}`,
-          conferenceSolutionKey: { type: 'hangoutsMeet' },
+      ...(externalJoinUrl ? { location: externalJoinUrl } : {}),
+      ...(useGoogleMeet ? {
+        conferenceData: {
+          createRequest: {
+            requestId: `mailsense-${Date.now()}`,
+            conferenceSolutionKey: { type: 'hangoutsMeet' },
+          },
         },
-      },
+      } : {}),
     },
   });
 
   return {
     eventId: res.data.id,
-    meetLink: res.data.conferenceData?.entryPoints?.find(e => e.entryPointType === 'video')?.uri || null,
+    meetLink: externalJoinUrl || res.data.conferenceData?.entryPoints?.find(e => e.entryPointType === 'video')?.uri || null,
     htmlLink: res.data.htmlLink,
   };
 }
